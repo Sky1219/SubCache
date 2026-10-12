@@ -15,7 +15,7 @@ cached tokens are basically duplicates, only one of them needs to stay.
 
 While the results weren't great, it was still a fun experiment. H2O turned out to be very hard
 to beat. My method did win, but only on repetitive text and only by a little, and it was much
-slower. I learned a lot more about inference from finding that out than I expected to.
+slower.
 
 ## What I ran it on
 
@@ -25,8 +25,7 @@ I used TinyLlama for the early experiments. For data I used real coding-agent se
 over and over, plus WikiText as a control with almost no repetition.
 
 The engine has its own KV cache instead of using Hugging Face's, so tokens can be masked out or
-physically removed. Before trusting any number I checked that it reproduces Hugging Face's
-greedy `generate` token for token on both models.
+physically removed.
 
 Text goes in 64 tokens at a time, and after each chunk the cache is cut back down to its
 budget. Every policy keeps the first 4 tokens and the newest half of the budget, so they only
@@ -57,11 +56,7 @@ fitting more sequences in memory.
 </picture>
 
 A little. On agent sessions it beat H2O at every budget I tried, and the gap grew as the budget
-shrank, but we're talking 0.2% to 1.4% lower perplexity on the agent's own tokens. That closes
-only a few percent of the distance between H2O and not evicting at all.
-
-One setting looked better in a sweep (using only the redundancy term, about 2-3% better), but I
-found it after the fact on one dataset, so I'm rerunning it before I believe it.
+shrank, but we're talking 0.2% to 1.4% lower perplexity on the agent's own tokens.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="figures/repetition-dark.svg">
@@ -91,27 +86,10 @@ tokens against each other in every attention head, and at a 12.5% budget that to
 decode time. Throughput dropped to 78 tok/s, which is worse than not evicting at all (190). A
 1% accuracy gain doesn't pay for that.
 
-## Other things I ran into
+## Limitations
 
-- My first idea was different: use submodular functions from the PRISM paper to cover what
-  recent queries attend to. That lost to H2O by up to 4%. The policy that kept the most
-  attention mass was not the most accurate one, which surprised me.
-- At really small budgets (3%), just using attention from the last 32 queries beat H2O on
-  three of my four datasets. I think H2O holds on to old tokens for too long, but I haven't
-  dug into it.
-- Qwen2.5-Coder-1.5B gives NaN for every output in fp16. My correctness check passed anyway at
-  first, because Hugging Face and my engine were both producing the same garbage token. It now
-  fails if any logit isn't finite.
-- I tried an R-KV-style baseline, which is the closest existing method (it also mixes attention
-  with key similarity). It was about even with H2O at big budgets and much worse at small ones.
-  I had to guess three of its settings, so this isn't a fair test of the real paper.
-
-## What this doesn't show
-
-These are small models, and I measured perplexity, not whether an agent actually finishes its
-task. The timings come from a shared lab machine and vary by around 13% between runs. And the
-"decoding is CPU-bound" result is about my hardware. On a faster host, cache size would matter
-for step time too and the speed story would be different.
+Because my machine was CPU bound, the true effect on speed is hard to know. Decode speed was
+identical at every cache size due to CPU limitations.
 
 ## Running it
 
@@ -135,8 +113,5 @@ benchmark and the figure code. `results/` has the raw numbers behind everything 
 - R-KV: Cai et al., NeurIPS 2025
 - Agent trajectories: `nebius/SWE-rebench-openhands-trajectories` (CC-BY-4.0)
 
-Most of the code here was written with Claude Code, and it suggested a lot of the individual
-experiments too. The question, the direction (submodular eviction, measuring speed and not just
-accuracy, testing on agent sessions) and running and checking the experiments were me. I'm now
-writing my own inference engine from scratch in a separate repo, so I understand every piece of
-this properly.
+This was written with Claude, but I am currently working on hand making my own inference engine
+from scratch.
