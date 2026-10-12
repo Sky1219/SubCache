@@ -1,6 +1,6 @@
 """Compare eviction runs against H2O with paired bootstrap confidence intervals.
 
-    python scripts/analyze.py results/edmonds/main32_*.jsonl
+    python scripts/analyze.py results/batch/core8k_late.jsonl
 
 Runs are paired by sequence (every run evaluates the same sequences in the same order), so the
 difference in per-sequence loss is resampled, not the two losses separately. A run is compared
