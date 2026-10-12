@@ -91,6 +91,9 @@ decode time. Throughput dropped to 78 tok/s, which is worse than not evicting at
 Because my machine was CPU bound, the true effect on speed is hard to know. Decode speed was
 identical at every cache size due to CPU limitations.
 
+These are also small models, and I measured perplexity, not whether an agent actually finishes
+its task.
+
 ## Running it
 
 ```bash
