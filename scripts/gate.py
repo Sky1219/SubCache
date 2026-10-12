@@ -3,7 +3,7 @@
     python scripts/gate.py                       # fp16 on cuda:0, 128 new tokens
     python scripts/gate.py --device cpu --dtype float32 --max-new 24 --lengths 64
 
-Set CUDA_DEVICE_ORDER=PCI_BUS_ID and CUDA_VISIBLE_DEVICES before running on edmonds.
+Set CUDA_DEVICE_ORDER=PCI_BUS_ID and CUDA_VISIBLE_DEVICES on a machine with more than one GPU.
 A mismatch is reported with the top-2 logit gap at the first differing step, so an fp16
 near-tie can be told apart from a real bug.
 """
