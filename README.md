@@ -1,107 +1,171 @@
 # SubCache
 
-Experiments on KV-cache eviction for LLM inference: which cached tokens can be dropped, what
-that costs in accuracy, and what it buys in memory and throughput. The starting question was
-whether submodular selection (the PRISM family of objectives) beats the standard
-attention-score heuristic, H2O.
+My goal as a researcher and coder is always to push for efficiency and speed wherever possible.
+My research is in subset selection for ML, where I use submodular functions, which capture
+diminishing returns, to choose the most useful subset of a larger set. Recently I've become
+interested in inference optimization and in how the hardware that runs models shapes their
+speed, and I saw an opportunity to combine the two areas. This project applies submodular
+selection to KV-cache eviction, using an importance-weighted facility-location objective
+(`wfl` in the code), and compares throughput, output quality, wall time and other relevant
+metrics against the standard attention-score heuristic, H2O.
 
-**Status: work in progress.** The engine and harness run and are tested. The results below are
-preliminary: small models, one dataset per result, and a larger batch on coding-agent sessions
-is still running.
+**Short version of the result:** evicting cache entries is well worth doing, and plain H2O
+gets nearly all of the benefit. The submodular redundancy term beats H2O only on repetitive
+context, by a fraction of a percent to a few percent, and its selection cost outweighs that.
 
-## What is here
+## Setup
 
-| Path | What it does |
-|---|---|
-| `subcache/engine.py` | Forward pass over Hugging Face weights with its own preallocated KV cache. Supports masked eviction (for accuracy), physically compacted eviction (for speed and memory), and batched decoding. |
-| `subcache/policies.py` | Eviction policies: recency, random, H2O, three PRISM objectives (GCMI, COM, FLQMI), a redundancy-aware variant of H2O (`wfl`), and an R-KV-style baseline. |
-| `subcache/evals.py` | Streaming perplexity under eviction, with per-sequence and per-token losses; a needle-retrieval test. |
-| `scripts/gate.py` | Correctness gate: the engine must reproduce `generate(do_sample=False)` token for token, single and batched, and fails on non-finite logits. |
-| `scripts/run_eviction.py` | Accuracy sweep over policies and budgets. |
-| `scripts/bench_speed.py` | Throughput, step time and memory against budget and batch size. |
-| `scripts/prepare_agent_data.py` | Builds evaluation sequences from public coding-agent trajectories. |
-| `scripts/analyze.py` | Paired-bootstrap comparison of each run against H2O. |
-| `tests/test_policies.py` | Unit tests for selection, compaction and eviction invariants. |
-| `results/` | Raw result rows (JSON lines) from the runs quoted below. |
+- **Models:** deepseek-coder-1.3b-instruct for the main results, TinyLlama-1.1B for early
+  ones. fp16 on an RTX 2080 Ti (11 GB).
+- **Engine:** a forward pass over Hugging Face weights with its own preallocated KV cache
+  (`subcache/engine.py`). It reproduces `generate(do_sample=False)` token for token on both
+  models, single and batched (`scripts/gate.py`).
+- **Data:** public coding-agent sessions (`nebius/SWE-rebench-openhands-trajectories`) and
+  WikiText-2 as a non-repetitive control.
+- **Protocol:** text is fed 64 tokens at a time and the cache is evicted down to its budget
+  after each chunk. Every policy keeps the first 4 tokens and the newest half of the budget,
+  and chooses the rest. Perplexity is measured on the positions where the cache is over
+  budget. Policies are compared on the same sequences with paired bootstrap intervals.
 
-## Preliminary findings
+## 1. Eviction buys throughput through memory
 
-Hardware: RTX 2080 Ti (11 GB), fp16. Perplexity is measured on the positions where the cache
-is over budget; "ratio" is relative to H2O at the same budget.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/throughput-dark.svg">
+  <img src="figures/throughput-light.svg" alt="Bar chart: decode throughput rises from 190 tokens per second with the full cache to about 1,400 at a 6.25% budget">
+</picture>
 
-**1. Query-coverage objectives do not beat H2O.** TinyLlama-1.1B, WikiText-2, 32 sequences of
-1,024 tokens, half of each budget reserved for the newest tokens:
-
-| Policy | 50% budget | 25% | 12.5% |
+| Cache | Largest batch tested that fits | Throughput | Perplexity vs full cache |
 |---|---|---|---|
-| no eviction | 7.52 | 7.76 | 7.97 |
-| H2O | 7.65 | 8.14 | 8.86 |
-| H2O + redundancy term (`wfl`, mix 0.25) | 7.64 | 8.13 | 8.84 |
-| FLQMI | 7.70 | 8.29 | 9.03 |
-| GCMI / COM (32 recent queries) | 7.73 | 8.37 | 9.19 |
-| random | 7.85 | 8.73 | 9.80 |
-| recency | 7.93 | 8.85 | 9.97 |
+| Full | 4 | 190 tok/s | reference |
+| H2O, 50% budget | 6 | 263 tok/s | not measured |
+| H2O, 25% budget | 12 | 530 tok/s | +5% |
+| H2O, 12.5% budget | 24 | 1,046 tok/s | +12% |
+| H2O, 6.25% budget | 32 | 1,404 tok/s | +25% |
 
-- COM's concave term makes no measurable difference: it tracks the modular GCMI score.
-- The policies that retain the most recent-query attention mass are not the most accurate.
-- Giving the PRISM objectives a query set sampled from the whole history closes most of their
-  gap to H2O (about 1% worse instead of up to 4%), but not all of it.
-- A redundancy term on top of H2O helps slightly: 0.1% to 0.3% lower perplexity, with paired
-  95% intervals that exclude "no difference" at the 25% and 12.5% budgets. Its selection is far
-  more expensive.
+A quarter-size cache gives 2.8 times the throughput for about 5% higher perplexity. The decode
+step takes 21 to 23 ms at every batch size, so the whole gain comes from fitting more
+sequences in memory. The reason is that decoding on this machine is bound by the CPU issuing
+GPU kernel launches: batch-1 decode took the same 21 ms per token on the 2080 Ti and on an RTX
+A6000 in the same host.
 
-**2. Eviction pays through memory, not step time.** deepseek-coder-1.3b, 8,192-token contexts,
-256 decoded tokens, one run per configuration:
+## 2. A redundancy term beats H2O on repetitive context, slightly
 
-| Cache | Largest batch that fits | Throughput |
+H2O scores each token on its own, so it keeps every copy of content that appears twice. The
+`wfl` objective adds a facility-location term: each cached token, weighted by its H2O score,
+should have a similar token among those kept. Similarity is the product of key cosine and
+value cosine.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/redundancy-dark.svg">
+  <img src="figures/redundancy-light.svg" alt="Line chart: the redundancy objective is 0.2 to 1.4 percent better than H2O on agent tokens, more so at smaller budgets">
+</picture>
+
+Perplexity relative to H2O on late agent sessions (8,192 tokens; 1.0 means equal):
+
+| Budget | Weight 0.25, all tokens | Weight 0.25, agent's tokens | Weight 0.5, agent's tokens |
+|---|---|---|---|
+| 25% | 0.9986 | 0.9980 | 0.9959 |
+| 12.5% | 0.9979 | 0.9966 | 0.9934 |
+| 6.25% | 0.9980 | 0.9959 | 0.9903 |
+| 3.1% | 0.9977 | 0.9957 | 0.9861 |
+
+Every interval excludes 1.0, so the improvement is consistent, but it is small. With weight
+0.25, fixed before the run, it recovers 1% to 3% of the gap between H2O and the full cache.
+A sweep at 4,096 tokens found that the redundancy term alone (weight 1.0) does better, 1.7% to
+2.7% on the agent's tokens; that was found after the fact on one dataset and is being rerun at
+8,192 tokens.
+
+## 3. The gain appears only where the context repeats
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/repetition-dark.svg">
+  <img src="figures/repetition-light.svg" alt="Bar chart: the redundancy objective improves on H2O only on late agent sessions, not on session starts or WikiText">
+</picture>
+
+| Dataset | Share of 16-token runs seen earlier in the sequence | Effect of the redundancy term |
 |---|---|---|
-| full | 4 | 192 tok/s |
-| H2O, 25% budget | 8 | 361 tok/s |
-| H2O, 10% budget | 16 | 721 tok/s |
+| WikiText-2 | 0.2% | none (slightly worse at a 3.1% budget) |
+| Agent session, first 8,192 tokens | 8% | none |
+| Agent session, 8,192 tokens starting 24,000 in | 26% | 0.1% to 0.2% better at every budget |
 
-Decode step time stays near 20 ms from batch 1 to 16, because on this machine it is bound by
-the CPU issuing kernel launches, not by the GPU. Batch-1 decode took the same 21 ms per token
-on a 2080 Ti and on an RTX A6000 in the same host.
+This is the evidence that redundancy is what the objective exploits.
 
-**3. Coding-agent sessions are far more repetitive than prose.** Share of 16-token runs that
-already occurred earlier in the same sequence: 0.2% for WikiText, 8% for the first 8k tokens of
-an agent session, 26% for an 8k window starting 24k tokens in. Whether redundancy-aware
-eviction gains more there is what the running batch tests.
+## 4. Selection cost decides it
 
-## Caveats
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/selection-dark.svg">
+  <img src="figures/selection-light.svg" alt="Bar chart: selection takes under 1 percent of decode time for H2O, 19 percent for the R-KV-style baseline and 71 percent for the redundancy objective">
+</picture>
 
-- Small models (1.1B and 1.3B parameters) and short contexts by current standards.
-- Agent-session accuracy is perplexity of a small model on trajectories written by a much
-  larger one; it is not task success.
-- The R-KV-style baseline uses three settings I had to choose (the paper text I had did not
-  give them) and this harness's rule for protected tokens. It is not a faithful reproduction.
-- Timings come from a shared machine and vary by roughly 15% between runs.
-- Qwen2.5-Coder-1.5B was dropped because it produces NaN logits in fp16.
+At a 12.5% budget the redundancy objective spends 71% of decode time choosing what to evict
+and reaches 78 tok/s, below the 190 tok/s of not evicting at all. H2O's selection is free by
+comparison. As built, the accuracy gain does not come close to paying for the cost.
 
-## Running it
+## Other findings
+
+- **Query-coverage objectives lose to H2O.** The PRISM objectives COM and FLQMI, with attention
+  as the kernel, were up to 4% worse than H2O on TinyLlama. COM's concave term made no
+  measurable difference, and the policies that retained the most recent-query attention were
+  not the most accurate.
+- **At very small budgets, scoring by recent attention beats H2O.** At a 3.1% budget, summing
+  attention from only the 32 newest queries was 2% to 4% better than H2O on session starts,
+  WikiText and 16,000-token sessions, and worse on late sessions. H2O's score accumulates over
+  the whole history, which seems to hurt when little can be kept. Not investigated further.
+- **An R-KV-style baseline** (attention importance minus key redundancy) matched or slightly
+  beat H2O at a 25% budget on the agent's tokens and was much worse at small budgets.
+- **Greedy removal matches exact greedy** on TinyLlama at 4 to 30 times less selection time,
+  without the approximation guarantee.
+- **Qwen2.5-Coder-1.5B produces NaN logits in fp16**, in Hugging Face as well as here, so it
+  was dropped. The gate now fails on non-finite logits; before that, two NaN paths "matched".
+
+## Limits
+
+- Small models (1.1B and 1.3B parameters), and perplexity rather than task success. The agent
+  sessions were written by a much larger model.
+- The R-KV-style baseline uses three settings I had to choose and this harness's rule for
+  protected tokens. It is not a faithful reproduction of the paper.
+- Timings come from a shared machine. Repeated runs of the same configuration differed by a
+  median of 13% in step time. Batch sizes were tried on a grid, so "largest batch" is the
+  largest tested.
+- One machine. With a faster CPU, or CUDA graphs, step time would depend on cache size and the
+  speed picture would change.
+
+## Repository
+
+| Path | Contents |
+|---|---|
+| `subcache/engine.py` | Forward pass, KV cache, masked and physically compacted eviction, batched decode |
+| `subcache/policies.py` | Recency, random, H2O, GCMI, COM, FLQMI, `wfl` (greedy and pruning), R-KV-style |
+| `subcache/evals.py` | Streaming perplexity with per-sequence and per-token losses; needle retrieval |
+| `scripts/gate.py` | Correctness gate against `generate` |
+| `scripts/run_eviction.py`, `scripts/bench_speed.py` | Accuracy sweeps; speed and memory benchmark |
+| `scripts/prepare_agent_data.py` | Builds evaluation sequences from agent trajectories |
+| `scripts/analyze.py`, `scripts/make_figures.py` | Paired-bootstrap comparison; the figures above |
+| `scripts/make_batch.py`, `scripts/batch_worker.sh`, `jobs.txt` | The unattended batch that produced `results/batch/` |
+| `results/` | Raw result rows (JSON lines) for every number quoted here |
+| `tests/test_policies.py` | Unit tests for selection, compaction and eviction invariants |
 
 ```bash
 pip install torch transformers datasets
 python tests/test_policies.py
-python scripts/gate.py                                   # TinyLlama, fp16, needs a GPU
-python scripts/run_eviction.py --n-seqs 8                # accuracy sweep on WikiText-2
-python scripts/analyze.py results/eviction.jsonl
-python scripts/bench_speed.py --context 8192             # speed and memory
+python scripts/gate.py                              # needs a GPU
+python scripts/run_eviction.py --n-seqs 8           # small accuracy sweep on WikiText-2
+python scripts/analyze.py results/batch/core8k_late.jsonl --masked
+python scripts/make_figures.py
 ```
 
-`subcache_colab.ipynb` bundles an earlier version of the same steps for a Colab T4.
-
-## Background and credit
+## Credit
 
 - H2O: Zhang et al., "H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large
   Language Models" (2023).
 - PRISM: Kothawade et al., "PRISM: A Rich Class of Parameterized Submodular Information
   Measures for Guided Subset Selection" (AAAI 2022).
 - R-KV: Cai et al., "R-KV: Redundancy-aware KV Cache Compression for Reasoning Models"
-  (NeurIPS 2025).
+  (NeurIPS 2025). The closest prior work: it also combines attention importance with key
+  redundancy, as a per-token score rather than a set function.
 - Agent trajectories: `nebius/SWE-rebench-openhands-trajectories` (CC-BY-4.0).
 
 Most of the code in this repository was written with Claude Code, which also proposed many of
 the individual experiments. I set the research question and direction (submodular eviction,
 measuring speed alongside accuracy, coding-agent sessions as the test bed), ran and reviewed the
-experiments, and am re-implementing the engine by hand as a follow-up.
+experiments, and am writing my own inference engine from scratch in a separate repository.
