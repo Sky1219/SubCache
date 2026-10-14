@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SubCache</title>
+<meta name="description" content="Can a submodular function pick which KV-cache tokens to keep better than H2O? Results from a paged-KV inference engine on an RTX 2080 Ti.">
+<style>
+  :root {
+    --bg: #fcfcfb; --surface: #f4f3ef; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --accent: #2a78d6; --accent-soft: #dceafb; --warn: #eb6834; --warn-soft: #fbe3d8;
+    --code-bg: #efeee9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a19; --surface: #232321; --ink: #ffffff; --ink2: #c3c2b7; --muted: #898781;
+      --line: #2c2c2a; --accent: #3987e5; --accent-soft: #1b3557; --warn: #d95926; --warn-soft: #4a2414;
+      --code-bg: #2a2a28;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 800px; margin: 0 auto; padding: 0 16px 80px; }
+  header { padding: 72px 0 32px; border-bottom: 1px solid var(--line); margin-bottom: 40px; }
+  .eyebrow { color: var(--accent); font-weight: 600; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; margin: 0 0 12px; }
+  h1 { font-size: clamp(34px, 6vw, 48px); line-height: 1.1; margin: 0 0 16px; letter-spacing: -.02em; }
+  .lede { font-size: 20px; color: var(--ink2); margin: 0 0 24px; }
+  .links { display: flex; flex-wrap: wrap; gap: 10px; }
+  .btn {
+    display: inline-block; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--line);
+    color: var(--ink); text-decoration: none; font-size: 15px; font-weight: 500; background: var(--surface);
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  h2 { font-size: 26px; line-height: 1.25; margin: 56px 0 12px; letter-spacing: -.01em; }
+  h3 { font-size: 18px; margin: 28px 0 8px; }
+  p { margin: 0 0 16px; }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: .88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 14px; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 8px 0 8px; }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .stat .num { font-size: 30px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat .num.good { color: var(--accent); }
+  .stat .num.bad { color: var(--warn); }
+  .stat .lbl { font-size: 14px; color: var(--ink2); margin-top: 6px; line-height: 1.4; }
+
+  figure { margin: 24px 0 28px; }
+  figure img { width: 100%; height: auto; display: block; border-radius: 8px; border: 1px solid var(--line); }
+  figcaption { font-size: 14px; color: var(--muted); margin-top: 8px; }
+
+  table { width: 100%; border-collapse: collapse; margin: 16px 0 20px; font-size: 16px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .yes { color: var(--accent); font-weight: 600; }
+  .no { color: var(--muted); }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin: 20px 0 24px; }
+  .panel h3 { margin-top: 0; }
+  .cache { display: flex; height: 44px; border-radius: 6px; overflow: hidden; font-size: 13px; font-weight: 600; margin: 8px 0 6px; }
+  .cache > div { display: flex; align-items: center; justify-content: center; text-align: center; padding: 0 6px; line-height: 1.2; }
+  .seg-sink { flex: 0 0 64px; background: var(--muted); color: var(--bg); }
+  .seg-mid { flex: 1 1 auto; background: repeating-linear-gradient(90deg, var(--accent) 0 10px, transparent 10px 18px); color: var(--ink); position: relative; }
+  .seg-mid span { background: var(--surface); padding: 2px 8px; border-radius: 4px; }
+  .seg-recent { flex: 0 0 38%; background: var(--accent); color: #fff; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 14px; color: var(--ink2); }
+
+  .compare { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 12px; }
+  .row-label { font-size: 14px; color: var(--ink2); margin-bottom: 6px; }
+  .tokens { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tok {
+    font: 600 13px/1 ui-monospace, Consolas, monospace; padding: 8px 10px; border-radius: 6px;
+    border: 1.5px solid var(--line); color: var(--muted); background: var(--bg); text-decoration: line-through;
+  }
+  .tok.keep { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); text-decoration: none; }
+  .tok.dup { border-style: dashed; }
+  .formula {
+    font-family: "Cambria Math", "STIX Two Math", Georgia, serif; font-size: 19px; text-align: center;
+    padding: 14px 8px; overflow-x: auto; white-space: nowrap;
+  }
+  .note { font-size: 15px; color: var(--ink2); }
+  .callout { border-left: 3px solid var(--warn); padding: 4px 0 4px 16px; margin: 20px 0; }
+  ul { padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
+  @media (max-width: 560px) {
+    body { font-size: 16px; }
+    header { padding-top: 48px; }
+    .lede { font-size: 18px; }
+    .seg-sink { flex-basis: 44px; }
+    th, td { padding: 8px 6px; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <p class="eyebrow">Inference optimization × submodular selection</p>
+  <h1>SubCache</h1>
+  <p class="lede">When an LLM's KV cache gets too big and you have to throw tokens away, can a submodular function pick what to keep better than the usual heuristic?</p>
+  <div class="links">
+    <a class="btn primary" href="https://github.com/Sky1219/SubCache">Code on GitHub</a>
+    <a class="btn" href="#results">Jump to results</a>
+  </div>
+</header>
+
+<section>
+  <p>My research is in subset selection for ML, where I use submodular functions (functions with diminishing returns) to pick the most useful subset out of a bigger set. Recently I've gotten interested in inference optimization and how the hardware behind a model affects how fast it runs, and I saw a chance to combine the two.</p>
+  <p>The short answer: <strong>a little, and not in a way that's worth it.</strong> H2O turned out to be very hard to beat. My method did win, but only on repetitive text, only by a little, and it was much slower.</p>
+
+  <div class="stats" aria-label="Headline numbers">
+    <div class="stat"><div class="num good">2.8×</div><div class="lbl">throughput from keeping 25% of the cache, for ~5% worse perplexity</div></div>
+    <div class="stat"><div class="num good">−1.4%</div><div class="lbl">best perplexity gain over H2O, on repetitive agent sessions</div></div>
+    <div class="stat"><div class="num bad">71%</div><div class="lbl">of decode time spent choosing what to evict with my method</div></div>
+    <div class="stat"><div class="num">21 ms</div><div class="lbl">per decode step at every batch and cache size (CPU bound)</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>What I built</h2>
+  <p>A small inference engine with its own KV cache instead of Hugging Face's, so cached tokens can be masked out or physically removed. Text goes in 64 tokens at a time, and after each chunk the cache is cut back down to its budget.</p>
+
+  <div class="panel">
+    <h3>How the cache budget is split</h3>
+    <div class="cache" role="img" aria-label="Cache layout: first 4 tokens always kept, newest half of the budget always kept, the policy chooses among the older tokens in between">
+      <div class="seg-sink">first 4</div>
+      <div class="seg-mid"><span>older tokens: policy chooses</span></div>
+      <div class="seg-recent">newest ½ of budget</div>
+    </div>
+    <div class="legend"><span>Every policy keeps the first 4 tokens (attention sinks) and the newest half of the budget.</span></div>
+    <p class="note" style="margin:10px 0 0">So policies differ only in <em>which older tokens survive</em>. That keeps the comparison fair: any difference in quality comes from the selection rule alone.</p>
+  </div>
+
+  <h3>The baseline: H2O</h3>
+  <p>H2O (“heavy hitters”) keeps the tokens that have received the most attention so far. Choosing is basically a sort, so it's nearly free.</p>
+
+  <h3>My version: H2O plus a redundancy term</h3>
+  <p>The weakness of H2O is that if the same content shows up twice, both copies tend to get a lot of attention, so both get kept. Coding agents do this constantly: they re-read the same file, re-run the same command, and see the same log again. I added a weighted facility-location term (<code>wfl</code> in the code) so that if two cached tokens are basically duplicates, only one of them needs to stay.</p>
+
+  <div class="panel">
+    <div class="formula">f(A) = (1 − λ) · Σ<sub>i∈A</sub> w<sub>i</sub> &nbsp;+&nbsp; λ · Σ<sub>i∈V</sub> w<sub>i</sub> · max<sub>j∈A</sub> sim(i, j)</div>
+    <p class="note" style="margin:0"><em>V</em> is every cached token, <em>A</em> is the set kept, <em>w</em> is H2O's attention score, and <em>sim</em> compares the cached keys and values. The first term is H2O. The second rewards keeping a <em>representative</em> for every important token, which is where the diminishing returns come in: a second copy of something already covered adds almost nothing. With λ = 0 it is exactly H2O.</p>
+  </div>
+
+  <div class="panel">
+    <h3>Toy example: room for 4 tokens</h3>
+    <p class="note">Two read-outs of the same file (<code>read a.py</code> and its repeat) both draw heavy attention.</p>
+    <div class="compare">
+      <div>
+        <div class="row-label">H2O keeps the 4 highest-attention tokens</div>
+        <div class="tokens">
+          <span class="tok keep">read a.py</span><span class="tok keep dup">read a.py ′</span><span class="tok keep">test fails</span><span class="tok keep dup">test fails ′</span><span class="tok">edit b.py</span><span class="tok">ls src/</span>
+        </div>
+      </div>
+      <div>
+        <div class="row-label">With the redundancy term, one copy covers both</div>
+        <div class="tokens">
+          <span class="tok keep">read a.py</span><span class="tok dup">read a.py ′</span><span class="tok keep">test fails</span><span class="tok dup">test fails ′</span><span class="tok keep">edit b.py</span><span class="tok keep">ls src/</span>
+        </div>
+      </div>
+    </div>
+    <p class="note" style="margin:12px 0 0">Illustrative only. In the real engine this runs per layer and per attention head over thousands of slots.</p>
+  </div>
+
+  <h3>Setup</h3>
+  <ul>
+    <li><strong>Hardware:</strong> one RTX 2080 Ti (11 GB), fp16. An RTX A6000 in the same box was used to check the speed result.</li>
+    <li><strong>Models:</strong> deepseek-coder-1.3b for the main results; TinyLlama for early experiments.</li>
+    <li><strong>Data:</strong> real coding-agent sessions from <code>nebius/SWE-rebench-openhands-trajectories</code>, plus WikiText as a control with almost no repetition.</li>
+    <li><strong>Metric:</strong> perplexity on the part of each sequence where the cache is actually over budget, with all policies run on the same sequences (paired comparison, 95% bootstrap intervals).</li>
+    <li><strong>Other baselines:</strong> sliding window, random, an R-KV-style importance-minus-redundancy score, and several PRISM objectives.</li>
+  </ul>
+</section>
+
+<section id="results">
+  <h2>Result 1: eviction is worth it, mostly because of memory</h2>
+  <figure>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="figures/throughput-dark.svg">
+      <img src="figures/throughput-light.svg" width="760" height="300" alt="Bar chart: decode throughput rises from 190 tokens per second with the full cache to about 1,400 at a 6.25% budget">
+    </picture>
+  </figure>
+  <p>With 8,192-token contexts, the full cache only fits 4 sequences on the card. Keeping a quarter of it fits 12, which is <strong>2.8× the throughput for about 5% worse perplexity</strong>.</p>
+  <div class="callout">
+    <p style="margin:0">Something I didn't expect: a smaller cache doesn't make each step faster. A decode step takes about 21 ms no matter the batch size or cache size. On this machine decoding is limited by the CPU launching GPU kernels, not by the GPU. Running the same thing on an RTX A6000 gave the same 21 ms. So <strong>all of the speedup comes from fitting more sequences in memory</strong>.</p>
+  </div>
+
+  <h2>Result 2: the submodular part helps, a little</h2>
+  <figure>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="figures/redundancy-dark.svg">
+      <img src="figures/redundancy-light.svg" width="760" height="400" alt="Line chart: the redundancy objective is 0.2 to 1.4 percent better than H2O on agent tokens, more so at smaller budgets">
+    </picture>
+  </figure>
+  <p>On agent sessions it beat H2O at every budget I tried, and the gap grew as the budget shrank. But we're talking <strong>0.2% to 1.4% lower perplexity</strong> on the agent's own tokens.</p>
+
+  <h2>Result 3: it only helps where there's repetition</h2>
+  <figure>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="figures/repetition-dark.svg">
+      <img src="figures/repetition-light.svg" width="760" height="380" alt="Bar chart: the redundancy objective improves on H2O only on late agent sessions, not on session starts or WikiText">
+    </picture>
+  </figure>
+  <p>This is the part I find most convincing. I measured how repetitive each dataset is: how often a run of 16 tokens has already appeared earlier in the same sequence.</p>
+  <table>
+    <thead><tr><th>Data</th><th>Repetition</th><th>Did it help?</th></tr></thead>
+    <tbody>
+      <tr><td>WikiText</td><td class="num">0.2%</td><td class="no">No</td></tr>
+      <tr><td>Start of an agent session</td><td class="num">8%</td><td class="no">No</td></tr>
+      <tr><td>24k tokens into an agent session</td><td class="num">26%</td><td class="yes">Yes, at every budget</td></tr>
+    </tbody>
+  </table>
+  <p>It only helps where there is redundancy to remove, which is exactly what the math says should happen.</p>
+
+  <h2>Result 4: why I wouldn't actually use it</h2>
+  <figure>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="figures/selection-dark.svg">
+      <img src="figures/selection-light.svg" width="760" height="230" alt="Bar chart: selection takes under 1 percent of decode time for H2O, 19 percent for the R-KV-style baseline and 71 percent for the redundancy objective">
+    </picture>
+  </figure>
+  <p>Picking what to evict isn't free. H2O's choice is basically a sort. Mine has to compare cached tokens against each other in every attention head, and at a 12.5% budget that took <strong>71% of decode time</strong>. Throughput dropped to 78 tok/s, which is worse than not evicting at all (190). A 1% accuracy gain doesn't pay for that.</p>
+</section>
+
+<section>
+  <h2>Limitations</h2>
+  <ul>
+    <li>Because the machine was CPU bound, the true effect of a smaller cache on step speed is hard to know: decode speed was identical at every cache size.</li>
+    <li>These are small models (1.3B and 1.1B parameters).</li>
+    <li>I measured perplexity, not whether an agent actually finishes its task.</li>
+  </ul>
+
+  <h2>Run it yourself</h2>
+<pre><code>pip install torch transformers datasets
+python tests/test_policies.py
+python scripts/gate.py                              # needs a GPU
+python scripts/run_eviction.py --n-seqs 8           # small sweep on WikiText
+python scripts/analyze.py results/batch/core8k_late.jsonl --masked
+python scripts/make_figures.py</code></pre>
+  <p>The engine is in <code>subcache/engine.py</code>, the eviction policies in <code>subcache/policies.py</code>, and the evaluations in <code>subcache/evals.py</code>. Every number on this page comes from the raw results in <code>results/</code>.</p>
+
+  <h2>Credit</h2>
+  <ul>
+    <li>H2O: Zhang et al., 2023</li>
+    <li>PRISM: Kothawade et al., AAAI 2022</li>
+    <li>R-KV: Cai et al., NeurIPS 2025</li>
+    <li>Agent trajectories: <code>nebius/SWE-rebench-openhands-trajectories</code> (CC-BY-4.0)</li>
+  </ul>
+</section>
+
+<footer>
+  This was written with Claude. I'm currently hand-writing my own inference engine from scratch. · <a href="https://github.com/Sky1219/SubCache">github.com/Sky1219/SubCache</a>
+</footer>
+
+</main>
+</body>
+</html>
