@@ -225,14 +225,17 @@ def fig_selection(t):
 
 
 def main():
-    out = os.path.join(ROOT, "figures")
-    os.makedirs(out, exist_ok=True)
+    outs = [os.path.join(ROOT, "figures"), os.path.join(ROOT, "docs", "figures")]  # README, results site
+    for out in outs:
+        os.makedirs(out, exist_ok=True)
     for name, fn in (("throughput", fig_throughput), ("redundancy", fig_redundancy), ("repetition", fig_repetition),
                      ("selection", fig_selection)):
         for mode, theme in THEMES.items():
-            with open(os.path.join(out, f"{name}-{mode}.svg"), "w", encoding="utf-8", newline="\n") as f:
-                f.write(fn(theme))
-    print("wrote", sorted(os.listdir(out)))
+            svg = fn(theme)
+            for out in outs:
+                with open(os.path.join(out, f"{name}-{mode}.svg"), "w", encoding="utf-8", newline="\n") as f:
+                    f.write(svg)
+    print("wrote", sorted(os.listdir(outs[0])), "to", outs)
 
 
 if __name__ == "__main__":
