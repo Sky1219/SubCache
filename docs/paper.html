@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SubCache Paper</title>
+<meta name="description" content="Redundancy-aware KV-cache eviction with weighted facility location: a short write-up of the SubCache experiments.">
+<style>
+  :root {
+    --bg: #fcfcfb; --surface: #f4f3ef; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --rule: #0b0b0b; --accent: #2a78d6; --good: #1c5cab; --bad: #b84a1f; --code-bg: #efeee9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a19; --surface: #232321; --ink: #ffffff; --ink2: #c3c2b7; --muted: #898781;
+      --line: #2c2c2a; --rule: #c3c2b7; --accent: #3987e5; --good: #6da7ec; --bad: #ef8a5f; --code-bg: #2a2a28;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 17.5px/1.7 Charter, "Bitstream Charter", "Iowan Old Style", Georgia, Cambria, serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 0 16px 80px; }
+  nav { font: 14px/1 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 20px 0; }
+  nav a { color: var(--ink2); text-decoration: none; }
+  nav a:hover { color: var(--accent); }
+  header { text-align: center; padding: 28px 0 8px; }
+  h1 { font-size: clamp(26px, 4.6vw, 34px); line-height: 1.2; margin: 0 0 16px; font-weight: 700; }
+  .byline { color: var(--ink2); font-size: 16px; margin: 0; }
+  .byline a { color: inherit; }
+  .abstract { margin: 32px 0 8px; padding: 0 clamp(0px, 4vw, 40px); font-size: 16.5px; }
+  .abstract h2 { text-align: center; font-size: 15px; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 8px; border: 0; }
+  h2 { font-size: 22px; margin: 44px 0 10px; line-height: 1.3; }
+  h3 { font-size: 18px; margin: 26px 0 6px; }
+  p { margin: 0 0 14px; text-align: justify; hyphens: auto; }
+  a { color: var(--accent); }
+  code { font: .84em ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--code-bg); padding: 1px 4px; border-radius: 3px; }
+  pre { background: var(--code-bg); padding: 14px; border-radius: 6px; overflow-x: auto; font-size: 13.5px; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  ul, ol { padding-left: 24px; }
+  li { margin-bottom: 4px; }
+  .eq { display: flex; align-items: center; gap: 12px; margin: 18px 0; overflow-x: auto; }
+  .eq .m { flex: 1; text-align: center; font-family: "Cambria Math", "STIX Two Math", Cambria, Georgia, serif; font-size: 19px; white-space: nowrap; }
+  .eq .n { color: var(--muted); font-size: 15px; }
+  figure { margin: 26px 0; }
+  figure img { width: 100%; height: auto; display: block; border-radius: 6px; border: 1px solid var(--line); }
+  figcaption, .tcap { font-size: 15px; color: var(--ink2); line-height: 1.5; margin-top: 8px; text-align: left; }
+  figcaption b, .tcap b { color: var(--ink); }
+  .tbl { margin: 24px 0; }
+  .tbl .scroll { overflow-x: auto; }
+  .tcap { margin: 0 0 8px; }
+  table { border-collapse: collapse; width: 100%; font: 14.5px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
+  thead tr:first-child th { border-top: 1.5px solid var(--rule); }
+  thead th { border-bottom: 1px solid var(--rule); font-weight: 600; padding: 7px 10px; text-align: right; white-space: nowrap; }
+  tbody td { padding: 6px 10px; text-align: right; white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: 1.5px solid var(--rule); }
+  th:first-child, td:first-child { text-align: left; }
+  tr.sep td { border-top: 1px solid var(--line); }
+  td .ci { color: var(--muted); font-size: 12.5px; }
+  .g { color: var(--good); font-weight: 600; }
+  .b { color: var(--bad); }
+  .ns { color: var(--muted); }
+  .refs { font-size: 15.5px; }
+  .refs li { margin-bottom: 8px; }
+  .note { font-size: 15px; color: var(--ink2); }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--muted); }
+  @media (max-width: 560px) {
+    body { font-size: 16.5px; }
+    p { text-align: left; }
+    .abstract { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<nav><a href="./">← SubCache overview</a></nav>
+
+<header>
+  <h1>Redundancy-Aware KV-Cache Eviction with Weighted Facility Location</h1>
+  <p class="byline"><a href="https://github.com/Sky1219">Sky1219</a> · October 2026 · <a href="https://github.com/Sky1219/SubCache">Code and data</a></p>
+</header>
+
+<section class="abstract">
+  <h2>Abstract</h2>
+  <p>Long contexts make the key-value (KV) cache the main memory cost of LLM inference, and evicting cached tokens is a common way to fit more sequences on a GPU. The standard heuristic, H2O, keeps the tokens that have received the most attention. That rule cannot tell when two cached tokens carry the same information, which happens constantly in coding-agent sessions, where the same files and logs are read again and again. I add a weighted facility-location term to H2O's score, so the kept set must <em>cover</em> every important token rather than simply contain the highest-scoring ones. On 8,192-token windows from real agent sessions with deepseek-coder-1.3b, the objective lowers perplexity on the agent's own tokens by 0.2% to 1.4% relative to H2O, at every budget from 25% down to 3.1%, with 95% intervals that exclude zero. The gain appears only on text that actually repeats: it is absent on WikiText and at the start of sessions. But selection is expensive: at a 12.5% budget it takes 71% of decode time and cuts throughput below the no-eviction baseline. Separately, eviction with H2O gives 2.8× throughput at a 25% budget for about 5% higher perplexity, and on this machine all of that gain comes from fitting more sequences in memory, because decoding is bound by CPU kernel launches rather than by the GPU.</p>
+</section>
+
+<h2>1. Introduction</h2>
+<p>During decoding, a transformer stores the key and value vectors of every previous token so it does not recompute them. This KV cache grows linearly with context length and batch size. For deepseek-coder-1.3b in fp16, an 8,192-token context takes enough cache that only four sequences fit on an 11 GB RTX 2080 Ti. Cache eviction keeps a fixed budget of cached tokens and drops the rest, trading some quality for memory.</p>
+<p>Choosing what to keep is a subset selection problem, which is what my research is about. Submodular functions, which have diminishing returns, are the standard tool for picking a subset that is both relevant and non-redundant. H2O [1] is effectively a modular objective: every token's value is its accumulated attention, independent of what else is kept. A modular objective will happily keep five copies of the same file read-out if each copy draws attention. A facility-location term fixes that, because a second copy of something already covered adds almost nothing.</p>
+<p>This write-up asks whether that matters in practice. Contributions:</p>
+<ol>
+  <li>A small inference engine with its own paged KV cache, in which every eviction policy shares the same protected sink and recent tokens and differs only in how the older tokens are chosen.</li>
+  <li>A redundancy-aware objective (WFL) that mixes H2O's modular score with an importance-weighted facility-location term over key and value similarity, optimized by greedy pruning.</li>
+  <li>A paired evaluation on real coding-agent trajectories and WikiText, with a direct measure of repetition, showing the gain tracks repetition.</li>
+  <li>Throughput measurements showing where the speedup from eviction comes from on this hardware, and what selection costs.</li>
+</ol>
+
+<h2>2. Background and related work</h2>
+<p><b>Attention-score eviction.</b> H2O [1] keeps “heavy hitters”, the tokens with the largest accumulated attention, plus a window of recent tokens. Its selection is a top-k, so it is nearly free.</p>
+<p><b>Attention sinks.</b> StreamingLLM [2] observed that the first few tokens absorb a large share of attention regardless of content, and that dropping them collapses the model. All policies here protect the first four tokens; Section 5.4 confirms the effect.</p>
+<p><b>Window-based importance.</b> Some methods score cached tokens only by attention from the most recent queries rather than the whole history. In PRISM's terms [3] this is the graph-cut mutual-information objective, which is modular, so it reduces to H2O restricted to a window. It appears below as GCMI.</p>
+<p><b>Redundancy-aware eviction.</b> R-KV [4] targets reasoning models, whose outputs repeat themselves, and scores tokens by importance minus a redundancy penalty computed from key similarity. I implemented an R-KV-style baseline; the paper's exact thresholds and pooling were not available, so that baseline uses my own choices and should not be read as a reproduction.</p>
+<p><b>Submodular subset selection.</b> PRISM [3] defines a family of submodular information measures (facility-location, graph-cut and concave-over-modular forms) for targeted subset selection. The objective here borrows the facility-location form and weights it by H2O's importance scores.</p>
+
+<h2>3. Method</h2>
+<h3>3.1 Eviction protocol</h3>
+<p>Text is processed in chunks. Whenever the cache exceeds its capacity <i>C</i> (a fraction of the context, the <em>budget</em>), it is cut back to <i>C</i> slots. Every policy keeps the first 4 tokens and the newest <i>C</i>/2 tokens, and selects the remaining slots from the older candidates. Eviction is permanent: an evicted token is never a candidate again. Selection runs independently for each (layer, KV head) pair, batched over all of them as tensors, so different heads keep different tokens.</p>
+
+<h3>3.2 Objective</h3>
+<p>Let <i>V</i> be the live slots of one (layer, KV head), <i>A</i> ⊆ <i>V</i> the slots kept, and <i>w<sub>i</sub></i> the H2O score of slot <i>i</i> (its accumulated attention, normalized to sum to one). With λ ∈ [0, 1] the redundancy weight, WFL maximizes</p>
+<div class="eq"><div class="m">f(A) = (1 − λ) Σ<sub><i>i</i>∈<i>A</i></sub> <i>w<sub>i</sub></i> + λ Σ<sub><i>i</i>∈<i>V</i></sub> <i>w<sub>i</sub></i> max<sub><i>j</i>∈<i>A</i></sub> sim(<i>i</i>, <i>j</i>)</div><div class="n">(1)</div></div>
+<p>The first term is H2O. The second is a weighted facility-location function: each slot <i>i</i> is “served” by its most similar kept slot, and important slots count more. With λ = 0 the objective is exactly H2O. For λ &gt; 0, keeping a near-duplicate of a slot already kept adds little, so the budget goes to tokens that cover something new. Similarity combines keys and values:</p>
+<div class="eq"><div class="m">sim(<i>i</i>, <i>j</i>) = ( max(0, cos(<b>k</b><sub><i>i</i></sub>, <b>k</b><sub><i>j</i></sub>)) · max(0, cos(<b>v</b><sub><i>i</i></sub>, <b>v</b><sub><i>j</i></sub>)) )<sup><i>p</i></sup></div><div class="n">(2)</div></div>
+<p>with sharpening exponent <i>p</i> = 1 unless stated. Requiring both keys and values to agree means two slots count as duplicates only if they would be attended to similarly <em>and</em> would contribute similar content. Both terms are monotone and the facility-location term is submodular for non-negative similarities, so <i>f</i> is monotone submodular.</p>
+
+<h3>3.3 Optimization</h3>
+<p>Standard greedy selection adds slots one at a time until the budget is full. Usually only a few slots must go at each eviction, so I run greedy in reverse: start from all candidates and repeatedly remove the slots whose removal loses the least of <i>f</i>, eight at a time. The loss of removing slot <i>j</i> is computed from each slot's best and second-best kept neighbour, so one pass over the similarity matrix gives every slot's removal cost. The similarity matrix is quadratic in the number of candidates per head, and that is the cost Section 5.5 measures.</p>
+
+<h3>3.4 Baselines</h3>
+<ul>
+  <li><b>Full:</b> no eviction (the quality reference).</li>
+  <li><b>Recency:</b> sinks plus the newest tokens only (StreamingLLM).</li>
+  <li><b>Random:</b> sinks, recent tokens, and a uniform random choice of the rest.</li>
+  <li><b>H2O:</b> top-<i>k</i> by accumulated attention over the whole history.</li>
+  <li><b>GCMI:</b> top-<i>k</i> by attention from the last 32 queries (windowed H2O).</li>
+  <li><b>R-KV-style:</b> λ·importance − (1 − λ)·redundancy, with λ = 0.1 and a 32-query window.</li>
+</ul>
+
+<h2>4. Experimental setup</h2>
+<p><b>Engine and hardware.</b> All runs use my own engine with a KV cache that supports masking and physical compaction of slots, on one RTX 2080 Ti (11 GB) in fp16. An RTX A6000 in the same machine was used to check the speed results. The model is deepseek-coder-1.3b-instruct; TinyLlama was used for early development only.</p>
+<p><b>Data.</b> Coding-agent sessions come from <code>nebius/SWE-rebench-openhands-trajectories</code> [5]: OpenHands agents working on real GitHub issues, rendered as plain text with system, assistant and tool messages. I build three 8,192-token sets of 64 sequences each:</p>
+<ul>
+  <li><b>WikiText</b>, a control with almost no repetition.</li>
+  <li><b>Agent start:</b> the first 8,192 tokens of each session.</li>
+  <li><b>Agent late:</b> 8,192 tokens taken about 24k tokens into each session, where the agent has re-read files and logs many times.</li>
+</ul>
+<p>Additional runs use 4,096-token windows, 16,000-token sessions (32 sequences), and a 96-sequence replicate.</p>
+<p><b>Repetition.</b> I measure repetition as the share of positions whose preceding 16 tokens already occurred earlier in the same sequence. It is 0.2% for WikiText, 8% for agent starts and 26% for late agent windows.</p>
+<p><b>Metric.</b> Perplexity is measured only on positions after the cache first exceeds its budget, since earlier positions are identical across policies. For agent data I also report perplexity on the agent's own tokens (the assistant messages), which is what an agent generates; tool output is largely copied text. Text is fed 64 tokens at a time and the cache is cut back after each chunk. Every policy sees the same sequences, so comparisons are paired: I report exp(mean<sub>s</sub>[NLL<sub>policy</sub>(s) − NLL<sub>H2O</sub>(s)]) − 1 over sequences <i>s</i>, as a percentage change against H2O, with a 95% bootstrap interval over sequences (5,000 resamples). Negative is better. Because this averages per-sequence log-perplexity, it can differ slightly from the ratio of pooled perplexities.</p>
+<p><b>Speed.</b> Throughput is measured with 8,192-token prompts and 256 decoded tokens, evicting every 128 tokens, at the largest batch that fits in memory, as the median of three repeats.</p>
+
+<h2>5. Results</h2>
+
+<h3>5.1 Eviction raises throughput by fitting more sequences</h3>
+<figure>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="figures/throughput-dark.svg">
+    <img src="figures/throughput-light.svg" width="760" height="300" alt="Bar chart: decode throughput rises from 190 tokens per second with the full cache to about 1,400 at a 6.25% budget">
+  </picture>
+  <figcaption><b>Figure 1.</b> Decode throughput with H2O at each budget, and the perplexity cost on late agent windows (all tokens).</figcaption>
+</figure>
+<p>With the full cache only four 8,192-token sequences fit, for 190 tokens/s. A 25% budget fits 12 sequences and reaches 530 tokens/s (2.8×) at 4.8% higher perplexity; 12.5% reaches 1,046 tokens/s at 11.6%; 6.25% reaches 1,404 tokens/s at 24.6%.</p>
+<p>The time per decode step barely moves: about 21 ms with the full cache at batch 4, and about 23 ms with a 6.25% budget at batch 32. Throughput scales almost exactly with batch size at every budget. A step that does not get faster as the batch grows eightfold, or as the cache shrinks sixteenfold, is not limited by GPU memory bandwidth or compute. The same 21 ms appeared on an RTX A6000, a much faster GPU, which points to the CPU-side cost of launching kernels. On this machine, then, eviction helps only by fitting more sequences into memory, and the per-token latency benefit that eviction should have on a memory-bound decoder could not be observed.</p>
+
+<h3>5.2 WFL beats H2O on late agent sessions</h3>
+<div class="tbl">
+  <p class="tcap"><b>Table 1.</b> Change in perplexity on the agent's own tokens relative to H2O, late agent windows (8,192 tokens, 64 sequences). 95% bootstrap interval in brackets. <span class="g">Blue</span>: interval below zero. <span class="b">Orange</span>: interval above zero.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Policy</th><th>25%</th><th>12.5%</th><th>6.25%</th><th>3.1%</th></tr></thead>
+    <tbody>
+      <tr><td>H2O perplexity</td><td>2.287</td><td>2.478</td><td>2.852</td><td>3.487</td></tr>
+      <tr><td>Full-cache perplexity</td><td>2.190</td><td>2.223</td><td>2.252</td><td>2.285</td></tr>
+      <tr class="sep"><td>WFL, λ = 0.5</td><td class="g">−0.41% <span class="ci">[−0.74, −0.14]</span></td><td class="g">−0.66% <span class="ci">[−0.86, −0.48]</span></td><td class="g">−0.97% <span class="ci">[−1.41, −0.61]</span></td><td class="g">−1.39% <span class="ci">[−1.86, −0.96]</span></td></tr>
+      <tr><td>WFL, λ = 0.25</td><td class="g">−0.20% <span class="ci">[−0.31, −0.11]</span></td><td class="g">−0.34% <span class="ci">[−0.45, −0.24]</span></td><td class="g">−0.41% <span class="ci">[−0.58, −0.25]</span></td><td class="g">−0.46% <span class="ci">[−0.65, −0.30]</span></td></tr>
+      <tr><td>R-KV-style</td><td class="g">−1.53% <span class="ci">[−3.13, −0.18]</span></td><td class="ns">−0.44% <span class="ci">[−2.62, +1.50]</span></td><td class="b">+5.6% <span class="ci">[+3.8, +7.3]</span></td><td class="b">+20.5% <span class="ci">[+16.0, +25.6]</span></td></tr>
+      <tr><td>GCMI (windowed H2O)</td><td class="b">+3.5%</td><td class="b">+8.5%</td><td class="b">+11.8%</td><td class="b">+11.5%</td></tr>
+      <tr><td>Random</td><td class="b">+12.3%</td><td class="b">+23.6%</td><td class="b">+31.9%</td><td class="b">+39.0%</td></tr>
+      <tr><td>Recency</td><td class="b">+21.1%</td><td class="b">+31.9%</td><td class="b">+47.1%</td><td class="b">+53.8%</td></tr>
+    </tbody>
+  </table></div>
+</div>
+<p>WFL beats H2O at every budget, and the margin grows as the budget shrinks: with λ = 0.5 it goes from 0.4% at a 25% budget to 1.4% at 3.1%. That is the expected pattern. When the budget is generous there is room for duplicates, and when it is tight every duplicate displaces something unique. The effect is small but very consistent, because the comparison is paired and WFL changes only a few of H2O's choices. A 96-sequence replicate with λ = 0.25 gave −0.20%, −0.34%, −0.41% and −0.43%, matching the table almost exactly.</p>
+<p>The R-KV-style baseline is the strongest method at a 25% budget but collapses at small budgets, where penalizing redundancy without H2O's long-run importance throws away tokens the model still needs. Random and recency confirm that the choice of older tokens matters a great deal: keeping only recent tokens costs 21% to 54%.</p>
+<figure>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="figures/redundancy-dark.svg">
+    <img src="figures/redundancy-light.svg" width="760" height="400" alt="Line chart: the redundancy objective is 0.2 to 1.4 percent better than H2O on agent tokens, more so at smaller budgets">
+  </picture>
+  <figcaption><b>Figure 2.</b> WFL relative to H2O on the agent's own tokens, late agent windows. Bars are 95% intervals.</figcaption>
+</figure>
+
+<h3>5.3 The gain tracks repetition</h3>
+<div class="tbl">
+  <p class="tcap"><b>Table 2.</b> WFL (λ = 0.25) relative to H2O on all tokens, by dataset and budget (8,192 tokens, 64 sequences each). Grey: interval includes zero.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Dataset</th><th>Repetition</th><th>25%</th><th>12.5%</th><th>6.25%</th><th>3.1%</th></tr></thead>
+    <tbody>
+      <tr><td>WikiText</td><td>0.2%</td><td class="g">−0.03%</td><td class="ns">−0.01%</td><td class="b">+0.08%</td><td class="b">+0.50%</td></tr>
+      <tr><td>Agent start</td><td>8%</td><td class="ns">−0.01%</td><td class="ns">−0.01%</td><td class="b">+0.07%</td><td class="b">+0.04%</td></tr>
+      <tr><td>Agent late</td><td>26%</td><td class="g">−0.15%</td><td class="g">−0.19%</td><td class="g">−0.18%</td><td class="g">−0.24%</td></tr>
+    </tbody>
+  </table></div>
+</div>
+<p>On WikiText and at the start of sessions WFL is indistinguishable from H2O at large budgets and slightly worse at small ones, where diversity costs it tokens that were important for their own sake. Only on late agent windows, where a quarter of 16-token spans are verbatim repeats, does it help, and there it helps at every budget. That is the result I find most convincing: the objective helps exactly where there is redundancy to remove, as the math predicts. (The gains are smaller on all tokens than on agent tokens because much of the tool output is copied text that is easy to predict under any policy.)</p>
+<figure>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="figures/repetition-dark.svg">
+    <img src="figures/repetition-light.svg" width="760" height="380" alt="Bar chart: the redundancy objective improves on H2O only on late agent sessions, not on session starts or WikiText">
+  </picture>
+  <figcaption><b>Figure 3.</b> WFL relative to H2O, by dataset and budget. Below zero is better.</figcaption>
+</figure>
+
+<h3>5.4 Ablations</h3>
+<p>Ablations use 4,096-token late agent windows (64 sequences) and report the change on agent tokens relative to H2O at budgets of 25% and 6.25%. Unless varied, λ = 0.25, <i>p</i> = 1, pruning step 8, eviction every 64 tokens and recent share ½.</p>
+<div class="tbl">
+  <p class="tcap"><b>Table 3.</b> WFL ablations, change relative to H2O on agent tokens. Selection time is seconds per eviction across all heads at a 25% budget.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Setting</th><th>25%</th><th>6.25%</th><th>Selection (s)</th></tr></thead>
+    <tbody>
+      <tr><td>Default (λ = 0.25)</td><td class="g">−0.32%</td><td class="g">−0.65%</td><td>0.61</td></tr>
+      <tr class="sep"><td>λ = 0.1</td><td class="g">−0.10%</td><td class="g">−0.21%</td><td>0.59</td></tr>
+      <tr><td>λ = 1.0 (facility location only)</td><td class="g">−1.67%</td><td class="g">−2.73%</td><td>0.58</td></tr>
+      <tr class="sep"><td>Similarity exponent <i>p</i> = 2</td><td class="g">−0.25%</td><td class="g">−0.49%</td><td>0.59</td></tr>
+      <tr><td>Similarity exponent <i>p</i> = 4</td><td class="g">−0.14%</td><td class="g">−0.21%</td><td>0.58</td></tr>
+      <tr class="sep"><td>Prune 1 slot per step</td><td class="g">−0.33%</td><td class="g">−0.65%</td><td>4.18</td></tr>
+      <tr><td>Prune 32 slots per step</td><td class="g">−0.34%</td><td class="g">−0.49%</td><td>0.20</td></tr>
+      <tr class="sep"><td>Evict every 16 tokens</td><td class="g">−0.37%</td><td class="g">−0.51%</td><td>0.19</td></tr>
+      <tr><td>Evict every 256 tokens</td><td class="g">−0.38%</td><td class="g">−0.78%</td><td>2.62</td></tr>
+      <tr class="sep"><td>Recent share 0.1</td><td class="g">−0.13%</td><td class="g">−0.82%</td><td>0.58</td></tr>
+      <tr><td>Recent share 0.25</td><td class="g">−0.33%</td><td class="g">−0.76%</td><td>0.58</td></tr>
+      <tr><td>Recent share 0.75</td><td class="g">−0.53%</td><td class="g">−0.71%</td><td>0.58</td></tr>
+    </tbody>
+  </table></div>
+</div>
+<p><b>Redundancy weight.</b> The gain grows steadily with λ, and pure facility location (λ = 1, with H2O's scores only as weights) is best, at −1.7% and −2.7%. The 8k experiments used λ ≤ 0.5, so the main tables likely understate what the objective can do. <b>Similarity.</b> Sharpening the similarity (<i>p</i> &gt; 1) shrinks the gain, consistent with near-duplicates rather than exact copies being what matters. <b>Pruning step.</b> Removing eight slots per greedy step gives the same quality as removing one, at a seventh of the cost. Removing 32 per step is three times cheaper again and gives up some quality at small budgets. <b>Robustness.</b> The gain holds at every eviction interval and recent-window share tried. At 16,000 tokens from session starts (lower repetition), WFL was within noise of H2O at 12.5%, 0.2% better at 6.25% and 0.3% worse at 3.1%, in line with Section 5.3.</p>
+<p><b>Attention sinks.</b> With no protected first tokens, recency-only eviction reached perplexity 5.1 at a 25% budget and 19.8 at 6.25%, against 2.4 and 3.4 with sinks. H2O was unaffected (2.16 either way), because it keeps the sinks on its own: they have the highest accumulated attention.</p>
+
+<h3>5.5 Selection cost</h3>
+<figure>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="figures/selection-dark.svg">
+    <img src="figures/selection-light.svg" width="760" height="230" alt="Bar chart: selection takes under 1 percent of decode time for H2O, 19 percent for the R-KV-style baseline and 71 percent for the redundancy objective">
+  </picture>
+  <figcaption><b>Figure 4.</b> Share of decode time spent on selection at a 12.5% budget, 8,192-token prompts, evicting every 128 tokens, at the largest batch that fits.</figcaption>
+</figure>
+<p>H2O's selection is a top-<i>k</i> and takes under 1% of decode time, about 0.6 ms per eviction. WFL builds a similarity matrix over the candidates of every head and takes about 0.6 s per eviction at a 12.5% budget, roughly a thousand times longer, which is 71% of decode time. At batch 8, the largest tested for WFL, throughput is 78 tokens/s, below the 190 tokens/s of not evicting at all, and selection's share of time grows with batch size (24% at batch 1, 71% at batch 8), so larger batches would not rescue it. The R-KV-style baseline sits in between at 19%. A 1% quality gain does not pay for this.</p>
+
+<h2>6. Discussion</h2>
+<p><b>Is the idea right?</b> Partly. The diminishing-returns structure does what it should: it helps on redundant context, more so at tight budgets, and not otherwise. But H2O is a very strong baseline, and the room left above it is small: on late agent windows at a 12.5% budget, H2O is 11.5% worse than the full cache on agent tokens and WFL closes only about 6% of that gap.</p>
+<p><b>Making it cheap.</b> The cost comes from computing all-pairs similarity per head at every eviction. Ways to cut it: compute similarity on a low-dimensional sketch of the keys; restrict it to the few hundred tokens H2O is about to keep or drop rather than all candidates; share one selection across the heads of a layer, as R-KV does; or evict less often with a larger slack. The ablations suggest the quality survives coarser optimization (32 slots per step loses little at 25%), so there is room to trade accuracy for speed.</p>
+<p><b>A side observation.</b> On WikiText and agent starts at a 3.1% budget, windowed H2O (GCMI) beat full-history H2O by about 4% on all tokens, but it was 2% to 4% worse on late agent windows. Which notion of importance is right seems to depend on how far back the text needs to reach, which the repetition measure partly captures.</p>
+
+<h2>7. Limitations</h2>
+<ul>
+  <li>The machine was CPU-bound, so the decode step was about 21 ms at every cache size. The latency benefit of a smaller cache on a memory-bound decoder could not be measured, and throughput comparisons reflect only batch capacity.</li>
+  <li>The models are small (1.3B and 1.1B parameters). Larger models have more heads and longer useful context, and both the gain and the cost may scale differently.</li>
+  <li>The quality metric is perplexity under teacher forcing, not whether an agent completes its task. Small perplexity differences may or may not change behaviour.</li>
+  <li>The R-KV-style baseline is not a faithful reproduction of R-KV.</li>
+  <li>Hyperparameters (λ, <i>p</i>, pruning step) were explored on 4k windows of the same data source used for the main results, though on different windows.</li>
+</ul>
+
+<h2>8. Conclusion</h2>
+<p>Adding a weighted facility-location term to H2O makes KV-cache eviction redundancy-aware. On repetitive coding-agent context it gives a small but consistent improvement over H2O that grows as the budget shrinks, and on non-repetitive text it gives nothing, which is what the theory predicts. As implemented, selection is far too slow to use. The more practical finding is about the hardware: on this machine, eviction speeds things up only because more sequences fit in memory. A cheaper approximation of the objective, measured on a GPU-bound setup and against task success rather than perplexity, is the natural next step.</p>
+
+<h2>References</h2>
+<ol class="refs">
+  <li>Z. Zhang et al. H<sub>2</sub>O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. NeurIPS 2023.</li>
+  <li>G. Xiao et al. Efficient Streaming Language Models with Attention Sinks. ICLR 2024.</li>
+  <li>S. Kothawade et al. PRISM: A Rich Class of Parameterized Submodular Information Measures for Guided Data Subset Selection. AAAI 2022.</li>
+  <li>Z. Cai et al. R-KV: Redundancy-aware KV Cache Compression for Reasoning Models. NeurIPS 2025.</li>
+  <li>Nebius. SWE-rebench OpenHands trajectories (<code>nebius/SWE-rebench-openhands-trajectories</code>). CC-BY-4.0.</li>
+</ol>
+
+<h2>Appendix: reproducing the results</h2>
+<pre><code>pip install torch transformers datasets
+python tests/test_policies.py
+python scripts/gate.py                              # correctness gate, needs a GPU
+python scripts/run_eviction.py --n-seqs 8           # small sweep on WikiText
+python scripts/analyze.py results/batch/core8k_late.jsonl --masked
+python scripts/make_figures.py</code></pre>
+<p class="note">Every number above comes from the raw results in <code>results/batch/</code> of the <a href="https://github.com/Sky1219/SubCache">repository</a>: <code>core8k_*.jsonl</code> for Tables 1 and 2, <code>core4k_late.jsonl</code> and <code>sweep_*.jsonl</code> for Table 3, <code>long16k.jsonl</code>, <code>core8k_late_n96.jsonl</code>, and <code>speed.jsonl</code> for Sections 5.1 and 5.5.</p>
+
+<footer>This project was built and written with Claude. <a href="./">Back to the overview</a></footer>
+
+</main>
+</body>
+</html>
