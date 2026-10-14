@@ -82,7 +82,7 @@
 
 <section class="abstract">
   <h2>Abstract</h2>
-  <p>Long contexts make the key-value (KV) cache the main memory cost of LLM inference, and evicting cached tokens is a common way to fit more sequences on a GPU. The standard heuristic, H2O, keeps the tokens that have received the most attention. That rule cannot tell when two cached tokens carry the same information, which happens constantly in coding-agent sessions, where the same files and logs are read again and again. I add a weighted facility-location term to H2O's score, so the kept set must <em>cover</em> every important token rather than simply contain the highest-scoring ones. On 8,192-token windows from real agent sessions with deepseek-coder-1.3b, the objective lowers perplexity on the agent's own tokens by 0.2% to 1.4% relative to H2O, at every budget from 25% down to 3.1%, with 95% intervals that exclude zero. The gain appears only on text that actually repeats: it is absent on WikiText and at the start of sessions. But selection is expensive: at a 12.5% budget it takes 71% of decode time and cuts throughput below the no-eviction baseline. Separately, eviction with H2O gives 2.8× throughput at a 25% budget for about 5% higher perplexity, and on this machine all of that gain comes from fitting more sequences in memory, because decoding is bound by CPU kernel launches rather than by the GPU.</p>
+  <p>Long contexts make the key-value (KV) cache the main memory cost of LLM inference, and evicting cached tokens is a common way to fit more sequences on a GPU. The standard heuristic, H2O, keeps the tokens that have received the most attention. That rule cannot tell when two cached tokens carry the same information, which happens constantly in coding-agent sessions, where the same files and logs are read again and again. I add a weighted facility-location term to H2O's score, so the kept set must <em>cover</em> every important token rather than simply contain the highest-scoring ones. On 8,192-token windows from real agent sessions with deepseek-coder-1.3b, the objective lowers perplexity on the agent's own tokens relative to H2O at every budget from 25% down to 3.1%, with 95% intervals that exclude zero: by 0.2% to 0.5% at the pre-chosen redundancy weight, and by 1.1% to 2.5% with pure facility location, a setting picked from an ablation and then confirmed on the full setup. The gain appears only on the most repetitive text. It is absent on WikiText, at the start of sessions and on 16,000-token sessions, where the stronger setting is up to 4% worse than H2O. But selection is expensive: at a 12.5% budget it takes 71% of decode time and cuts throughput below the no-eviction baseline. Separately, eviction with H2O gives 2.8× throughput at a 25% budget for about 5% higher perplexity, and on this machine all of that gain comes from fitting more sequences in memory, because decoding is bound by CPU kernel launches rather than by the GPU.</p>
 </section>
 
 <h2>1. Introduction</h2>
@@ -92,7 +92,7 @@
 <ol>
   <li>A small inference engine with its own paged KV cache, in which every eviction policy shares the same protected sink and recent tokens and differs only in how the older tokens are chosen.</li>
   <li>A redundancy-aware objective (WFL) that mixes H2O's modular score with an importance-weighted facility-location term over key and value similarity, optimized by greedy pruning.</li>
-  <li>A paired evaluation on real coding-agent trajectories and WikiText, with a direct measure of repetition, showing the gain tracks repetition.</li>
+  <li>A paired evaluation on real coding-agent trajectories and WikiText, with a direct measure of repetition, showing the gain appears only on the most repetitive data.</li>
   <li>Throughput measurements showing where the speedup from eviction comes from on this hardware, and what selection costs.</li>
 </ol>
 
@@ -161,7 +161,8 @@
     <tbody>
       <tr><td>H2O perplexity</td><td>2.287</td><td>2.478</td><td>2.852</td><td>3.487</td></tr>
       <tr><td>Full-cache perplexity</td><td>2.190</td><td>2.223</td><td>2.252</td><td>2.285</td></tr>
-      <tr class="sep"><td>WFL, λ = 0.5</td><td class="g">−0.41% <span class="ci">[−0.74, −0.14]</span></td><td class="g">−0.66% <span class="ci">[−0.86, −0.48]</span></td><td class="g">−0.97% <span class="ci">[−1.41, −0.61]</span></td><td class="g">−1.39% <span class="ci">[−1.86, −0.96]</span></td></tr>
+      <tr class="sep"><td>WFL, λ = 1</td><td class="g">−1.08% <span class="ci">[−1.82, −0.51]</span></td><td class="g">−1.37% <span class="ci">[−1.95, −0.87]</span></td><td class="g">−1.60% <span class="ci">[−2.47, −0.88]</span></td><td class="g">−2.50% <span class="ci">[−3.33, −1.70]</span></td></tr>
+      <tr><td>WFL, λ = 0.5</td><td class="g">−0.41% <span class="ci">[−0.74, −0.14]</span></td><td class="g">−0.66% <span class="ci">[−0.86, −0.48]</span></td><td class="g">−0.97% <span class="ci">[−1.41, −0.61]</span></td><td class="g">−1.39% <span class="ci">[−1.86, −0.96]</span></td></tr>
       <tr><td>WFL, λ = 0.25</td><td class="g">−0.20% <span class="ci">[−0.31, −0.11]</span></td><td class="g">−0.34% <span class="ci">[−0.45, −0.24]</span></td><td class="g">−0.41% <span class="ci">[−0.58, −0.25]</span></td><td class="g">−0.46% <span class="ci">[−0.65, −0.30]</span></td></tr>
       <tr><td>R-KV-style</td><td class="g">−1.53% <span class="ci">[−3.13, −0.18]</span></td><td class="ns">−0.44% <span class="ci">[−2.62, +1.50]</span></td><td class="b">+5.6% <span class="ci">[+3.8, +7.3]</span></td><td class="b">+20.5% <span class="ci">[+16.0, +25.6]</span></td></tr>
       <tr><td>GCMI (windowed H2O)</td><td class="b">+3.5%</td><td class="b">+8.5%</td><td class="b">+11.8%</td><td class="b">+11.5%</td></tr>
@@ -171,34 +172,39 @@
   </table></div>
 </div>
 <p>WFL beats H2O at every budget, and the margin grows as the budget shrinks: with λ = 0.5 it goes from 0.4% at a 25% budget to 1.4% at 3.1%. That is the expected pattern. When the budget is generous there is room for duplicates, and when it is tight every duplicate displaces something unique. The effect is small but very consistent, because the comparison is paired and WFL changes only a few of H2O's choices. A 96-sequence replicate with λ = 0.25 gave −0.20%, −0.34%, −0.41% and −0.43%, matching the table almost exactly.</p>
-<p>The R-KV-style baseline is the strongest method at a 25% budget but collapses at small budgets, where penalizing redundancy without H2O's long-run importance throws away tokens the model still needs. Random and recency confirm that the choice of older tokens matters a great deal: keeping only recent tokens costs 21% to 54%.</p>
+<p>λ = 1 was not part of the original plan. It came out best in the 4,096-token ablations (Section 5.4), so I reran it on the full 8,192-token setup as a confirmation, with the rule fixed in advance that it counts only if it closes at least 10% of the gap between H2O and the full cache on late agent windows and is no worse than the R-KV-style baseline. It closes 21% of the gap at a 25% budget and 11% at 12.5%, but only 5% and 4% at 6.25% and 3.1%. Against R-KV-style it is within noise at 25% and 12.5% (+0.46% [−0.55, +1.68] and −0.94% [−2.47, +0.83], paired) and much better below that. So it passes at the two larger budgets, on this dataset. Section 5.3 shows it does not carry over to the others.</p>
+<p>Apart from λ = 1, the R-KV-style baseline is the strongest method at a 25% budget but collapses at small budgets, where penalizing redundancy without H2O's long-run importance throws away tokens the model still needs. Random and recency confirm that the choice of older tokens matters a great deal: keeping only recent tokens costs 21% to 54%.</p>
 <figure>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="figures/redundancy-dark.svg">
-    <img src="figures/redundancy-light.svg" width="760" height="400" alt="Line chart: the redundancy objective is 0.2 to 1.4 percent better than H2O on agent tokens, more so at smaller budgets">
+    <img src="figures/redundancy-light.svg" width="760" height="400" alt="Line chart: on agent tokens the redundancy objective is 0.2 to 0.5 percent better than H2O with weight 0.25 and 1.1 to 2.5 percent better with weight 1.0, more so at smaller budgets">
   </picture>
-  <figcaption><b>Figure 2.</b> WFL relative to H2O on the agent's own tokens, late agent windows. Bars are 95% intervals.</figcaption>
+  <figcaption><b>Figure 2.</b> WFL with λ = 0.25 and λ = 1 relative to H2O on the agent's own tokens, late agent windows. Bars are 95% intervals.</figcaption>
 </figure>
 
-<h3>5.3 The gain tracks repetition</h3>
+<h3>5.3 The gain appears only on the most repetitive data</h3>
 <div class="tbl">
-  <p class="tcap"><b>Table 2.</b> WFL (λ = 0.25) relative to H2O on all tokens, by dataset and budget (8,192 tokens, 64 sequences each). Grey: interval includes zero.</p>
+  <p class="tcap"><b>Table 2.</b> WFL relative to H2O on all tokens, by dataset and budget (8,192 tokens, 64 sequences each). Grey: interval includes zero.</p>
   <div class="scroll"><table>
-    <thead><tr><th>Dataset</th><th>Repetition</th><th>25%</th><th>12.5%</th><th>6.25%</th><th>3.1%</th></tr></thead>
+    <thead><tr><th>Dataset</th><th>Repetition</th><th>λ</th><th>25%</th><th>12.5%</th><th>6.25%</th><th>3.1%</th></tr></thead>
     <tbody>
-      <tr><td>WikiText</td><td>0.2%</td><td class="g">−0.03%</td><td class="ns">−0.01%</td><td class="b">+0.08%</td><td class="b">+0.50%</td></tr>
-      <tr><td>Agent start</td><td>8%</td><td class="ns">−0.01%</td><td class="ns">−0.01%</td><td class="b">+0.07%</td><td class="b">+0.04%</td></tr>
-      <tr><td>Agent late</td><td>26%</td><td class="g">−0.15%</td><td class="g">−0.19%</td><td class="g">−0.18%</td><td class="g">−0.24%</td></tr>
+      <tr><td>WikiText</td><td>0.2%</td><td>0.25</td><td class="g">−0.03%</td><td class="ns">−0.01%</td><td class="b">+0.08%</td><td class="b">+0.50%</td></tr>
+      <tr><td>Agent start</td><td>8%</td><td>0.25</td><td class="ns">−0.01%</td><td class="ns">−0.01%</td><td class="b">+0.07%</td><td class="b">+0.04%</td></tr>
+      <tr><td>Agent late</td><td>26%</td><td>0.25</td><td class="g">−0.15%</td><td class="g">−0.19%</td><td class="g">−0.18%</td><td class="g">−0.24%</td></tr>
+      <tr class="sep"><td>WikiText</td><td>0.2%</td><td>1</td><td class="g">−0.08%</td><td class="b">+0.26%</td><td class="b">+0.52%</td><td class="g">−1.49%</td></tr>
+      <tr><td>Agent start</td><td>8%</td><td>1</td><td class="b">+0.08%</td><td class="b">+0.31%</td><td class="b">+0.68%</td><td class="ns">+0.11%</td></tr>
+      <tr><td>Agent late</td><td>26%</td><td>1</td><td class="g">−0.61%</td><td class="g">−0.67%</td><td class="g">−0.56%</td><td class="g">−1.11%</td></tr>
     </tbody>
   </table></div>
 </div>
-<p>On WikiText and at the start of sessions WFL is indistinguishable from H2O at large budgets and slightly worse at small ones, where diversity costs it tokens that were important for their own sake. Only on late agent windows, where a quarter of 16-token spans are verbatim repeats, does it help, and there it helps at every budget. That is the result I find most convincing: the objective helps exactly where there is redundancy to remove, as the math predicts. (The gains are smaller on all tokens than on agent tokens because much of the tool output is copied text that is easy to predict under any policy.)</p>
+<p>On WikiText and at the start of sessions WFL is indistinguishable from H2O at large budgets and slightly worse at small ones, where diversity costs it tokens that were important for their own sake. Only on late agent windows, where a quarter of 16-token spans are verbatim repeats, does it help, and there it helps at every budget. λ = 1 sharpens both sides: it is the best setting on late windows, and on agent starts it is worse than H2O at three of four budgets (on agent tokens by up to 1.9%). On WikiText it is mixed, worse at 12.5% and 6.25% and 1.5% better at 3.1%.</p>
+<p>The 16,000-token sessions (32 sequences, budgets 12.5% to 3.1%) complicate the repetition story. They are about 16% repetitive, twice the 8k session starts, yet λ = 0.25 is within 0.25% of H2O on agent tokens at every budget and λ = 1 is worse at all three, by 0.37%, 1.08% and 4.07% on agent tokens. So the objective helps where there is a lot of redundancy, but this repetition measure alone does not predict when it will. One guess is that what matters is how much of the repeated content is old enough to be a candidate for eviction, which a late window has more of than a session start of any length. I have not tested that. (The gains are smaller on all tokens than on agent tokens because much of the tool output is copied text that is easy to predict under any policy.)</p>
 <figure>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="figures/repetition-dark.svg">
     <img src="figures/repetition-light.svg" width="760" height="380" alt="Bar chart: the redundancy objective improves on H2O only on late agent sessions, not on session starts or WikiText">
   </picture>
-  <figcaption><b>Figure 3.</b> WFL relative to H2O, by dataset and budget. Below zero is better.</figcaption>
+  <figcaption><b>Figure 3.</b> WFL (λ = 0.25) relative to H2O, by dataset and budget. Below zero is better.</figcaption>
 </figure>
 
 <h3>5.4 Ablations</h3>
@@ -223,7 +229,7 @@
     </tbody>
   </table></div>
 </div>
-<p><b>Redundancy weight.</b> The gain grows steadily with λ, and pure facility location (λ = 1, with H2O's scores only as weights) is best, at −1.7% and −2.7%. The 8k experiments used λ ≤ 0.5, so the main tables likely understate what the objective can do. <b>Similarity.</b> Sharpening the similarity (<i>p</i> &gt; 1) shrinks the gain, consistent with near-duplicates rather than exact copies being what matters. <b>Pruning step.</b> Removing eight slots per greedy step gives the same quality as removing one, at a seventh of the cost. Removing 32 per step is three times cheaper again and gives up some quality at small budgets. <b>Robustness.</b> The gain holds at every eviction interval and recent-window share tried. At 16,000 tokens from session starts (lower repetition), WFL was within noise of H2O at 12.5%, 0.2% better at 6.25% and 0.3% worse at 3.1%, in line with Section 5.3.</p>
+<p><b>Redundancy weight.</b> The gain grows steadily with λ, and pure facility location (λ = 1, with H2O's scores only as weights) is best, at −1.7% and −2.7%. That led to the 8,192-token confirmation in Section 5.2, where λ = 1 also came out best on late windows (−1.1% and −1.6% at the same two budgets) but was worse than H2O on the other datasets (Section 5.3). <b>Similarity.</b> Sharpening the similarity (<i>p</i> &gt; 1) shrinks the gain, consistent with near-duplicates rather than exact copies being what matters. <b>Pruning step.</b> Removing eight slots per greedy step gives the same quality as removing one, at a seventh of the cost. Removing 32 per step is three times cheaper again and gives up some quality at small budgets. <b>Robustness.</b> The gain holds at every eviction interval and recent-window share tried. At 16,000 tokens from session starts, WFL with λ = 0.25 was within noise of H2O at 12.5%, 0.2% better at 6.25% and 0.3% worse at 3.1% (Section 5.3).</p>
 <p><b>Attention sinks.</b> With no protected first tokens, recency-only eviction reached perplexity 5.1 at a 25% budget and 19.8 at 6.25%, against 2.4 and 3.4 with sinks. H2O was unaffected (2.16 either way), because it keeps the sinks on its own: they have the highest accumulated attention.</p>
 
 <h3>5.5 Selection cost</h3>
@@ -237,7 +243,7 @@
 <p>H2O's selection is a top-<i>k</i> and takes under 1% of decode time, about 0.6 ms per eviction. WFL builds a similarity matrix over the candidates of every head and takes about 0.6 s per eviction at a 12.5% budget, roughly a thousand times longer, which is 71% of decode time. At batch 8, the largest tested for WFL, throughput is 78 tokens/s, below the 190 tokens/s of not evicting at all, and selection's share of time grows with batch size (24% at batch 1, 71% at batch 8), so larger batches would not rescue it. The R-KV-style baseline sits in between at 19%. A 1% quality gain does not pay for this.</p>
 
 <h2>6. Discussion</h2>
-<p><b>Is the idea right?</b> Partly. The diminishing-returns structure does what it should: it helps on redundant context, more so at tight budgets, and not otherwise. But H2O is a very strong baseline, and the room left above it is small: on late agent windows at a 12.5% budget, H2O is 11.5% worse than the full cache on agent tokens and WFL closes only about 6% of that gap.</p>
+<p><b>Is the idea right?</b> Partly. The diminishing-returns structure does what it should on the most redundant context: it helps, more so at tight budgets. But H2O is a very strong baseline. On late agent windows at a 12.5% budget, H2O is 13% worse than the full cache on agent tokens (paired), and WFL closes about 5% of that gap at λ = 0.5 and 11% at λ = 1. The stronger setting is not free either: it costs perplexity on every other dataset, so in practice the weight would have to depend on how redundant the context is, which would need its own estimate.</p>
 <p><b>Making it cheap.</b> The cost comes from computing all-pairs similarity per head at every eviction. Ways to cut it: compute similarity on a low-dimensional sketch of the keys; restrict it to the few hundred tokens H2O is about to keep or drop rather than all candidates; share one selection across the heads of a layer, as R-KV does; or evict less often with a larger slack. The ablations suggest the quality survives coarser optimization (32 slots per step loses little at 25%), so there is room to trade accuracy for speed.</p>
 <p><b>A side observation.</b> On WikiText and agent starts at a 3.1% budget, windowed H2O (GCMI) beat full-history H2O by about 4% on all tokens, but it was 2% to 4% worse on late agent windows. Which notion of importance is right seems to depend on how far back the text needs to reach, which the repetition measure partly captures.</p>
 
@@ -247,11 +253,11 @@
   <li>The models are small (1.3B and 1.1B parameters). Larger models have more heads and longer useful context, and both the gain and the cost may scale differently.</li>
   <li>The quality metric is perplexity under teacher forcing, not whether an agent completes its task. Small perplexity differences may or may not change behaviour.</li>
   <li>The R-KV-style baseline is not a faithful reproduction of R-KV.</li>
-  <li>Hyperparameters (λ, <i>p</i>, pruning step) were explored on 4k windows of the same data source used for the main results, though on different windows.</li>
+  <li>Hyperparameters (λ, <i>p</i>, pruning step) were explored on 4k windows of the same data source used for the main results, though on different windows. λ = 1 was chosen after seeing those results and checked once on the 8k setup with a rule set in advance; it passed at two budgets on one dataset.</li>
 </ul>
 
 <h2>8. Conclusion</h2>
-<p>Adding a weighted facility-location term to H2O makes KV-cache eviction redundancy-aware. On repetitive coding-agent context it gives a small but consistent improvement over H2O that grows as the budget shrinks, and on non-repetitive text it gives nothing, which is what the theory predicts. As implemented, selection is far too slow to use. The more practical finding is about the hardware: on this machine, eviction speeds things up only because more sequences fit in memory. A cheaper approximation of the objective, measured on a GPU-bound setup and against task success rather than perplexity, is the natural next step.</p>
+<p>Adding a weighted facility-location term to H2O makes KV-cache eviction redundancy-aware. On the most repetitive coding-agent context it gives a small but consistent improvement over H2O that grows as the budget shrinks, up to 2.5% with pure facility location, and on less repetitive text it gives nothing or makes things worse. As implemented, selection is far too slow to use. The more practical finding is about the hardware: on this machine, eviction speeds things up only because more sequences fit in memory. A cheaper approximation of the objective, measured on a GPU-bound setup and against task success rather than perplexity, is the natural next step.</p>
 
 <h2>References</h2>
 <ol class="refs">

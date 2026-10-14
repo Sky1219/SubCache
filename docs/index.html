@@ -61,6 +61,7 @@
   td.num { font-variant-numeric: tabular-nums; }
   .yes { color: var(--accent); font-weight: 600; }
   .no { color: var(--muted); }
+  .worse { color: var(--warn); font-weight: 600; }
 
   .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin: 20px 0 24px; }
   .panel h3 { margin-top: 0; }
@@ -119,7 +120,7 @@
 
   <div class="stats" aria-label="Headline numbers">
     <div class="stat"><div class="num good">2.8×</div><div class="lbl">throughput from keeping 25% of the cache, for ~5% worse perplexity</div></div>
-    <div class="stat"><div class="num good">−1.4%</div><div class="lbl">best perplexity gain over H2O, on repetitive agent sessions</div></div>
+    <div class="stat"><div class="num good">−2.5%</div><div class="lbl">best perplexity gain over H2O, on repetitive agent sessions</div></div>
     <div class="stat"><div class="num bad">71%</div><div class="lbl">of decode time spent choosing what to evict with my method</div></div>
     <div class="stat"><div class="num">21 ms</div><div class="lbl">per decode step at every batch and cache size (CPU bound)</div></div>
   </div>
@@ -198,10 +199,11 @@
   <figure>
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="figures/redundancy-dark.svg">
-      <img src="figures/redundancy-light.svg" width="760" height="400" alt="Line chart: the redundancy objective is 0.2 to 1.4 percent better than H2O on agent tokens, more so at smaller budgets">
+      <img src="figures/redundancy-light.svg" width="760" height="400" alt="Line chart: on agent tokens the redundancy objective is 0.2 to 0.5 percent better than H2O with weight 0.25 and 1.1 to 2.5 percent better with weight 1.0, more so at smaller budgets">
     </picture>
   </figure>
-  <p>On agent sessions it beat H2O at every budget I tried, and the gap grew as the budget shrank. But we're talking <strong>0.2% to 1.4% lower perplexity</strong> on the agent's own tokens.</p>
+  <p>On late agent sessions it beat H2O at every budget I tried, and the gap grew as the budget shrank. With the redundancy weight I picked in advance (λ = 0.25) we're talking <strong>0.2% to 0.5% lower perplexity</strong> on the agent's own tokens.</p>
+  <p>A smaller sweep suggested going all the way to λ = 1, so I reran that on the full 8,192-token setup. It holds up there: <strong>1.1% to 2.5% better than H2O</strong>, which is about a fifth of the gap between H2O and the full cache at a 25% budget and a tenth at 12.5%. At those two budgets it ties the R-KV-style baseline, and below them it beats it by a lot. But that's the only dataset where λ = 1 helps (next section).</p>
 
   <h2>Result 3: it only helps where there's repetition</h2>
   <figure>
@@ -210,16 +212,17 @@
       <img src="figures/repetition-light.svg" width="760" height="380" alt="Bar chart: the redundancy objective improves on H2O only on late agent sessions, not on session starts or WikiText">
     </picture>
   </figure>
-  <p>This is the part I find most convincing. I measured how repetitive each dataset is: how often a run of 16 tokens has already appeared earlier in the same sequence.</p>
+  <p>I measured how repetitive each dataset is: how often a run of 16 tokens has already appeared earlier in the same sequence.</p>
   <table>
-    <thead><tr><th>Data</th><th>Repetition</th><th>Did it help?</th></tr></thead>
+    <thead><tr><th>Data</th><th>Repetition</th><th>Weight 0.25</th><th>Weight 1</th></tr></thead>
     <tbody>
-      <tr><td>WikiText</td><td class="num">0.2%</td><td class="no">No</td></tr>
-      <tr><td>Start of an agent session</td><td class="num">8%</td><td class="no">No</td></tr>
-      <tr><td>24k tokens into an agent session</td><td class="num">26%</td><td class="yes">Yes, at every budget</td></tr>
+      <tr><td>WikiText</td><td class="num">0.2%</td><td class="no">No</td><td class="no">Mixed</td></tr>
+      <tr><td>Start of an agent session</td><td class="num">8%</td><td class="no">No</td><td class="worse">Worse</td></tr>
+      <tr><td>First 16k tokens of an agent session</td><td class="num">16%</td><td class="no">No</td><td class="worse">Worse</td></tr>
+      <tr><td>24k tokens into an agent session</td><td class="num">26%</td><td class="yes">Yes, at every budget</td><td class="yes">Yes, at every budget</td></tr>
     </tbody>
   </table>
-  <p>It only helps where there is redundancy to remove, which is exactly what the math says should happen.</p>
+  <p>It only helps on the most repetitive data, which fits the idea of removing redundancy. But the 16k sessions are fairly repetitive too and it didn't help there, so this repetition number alone doesn't predict when it will work. Turning the weight up makes the trade-off sharper: λ = 1 is the best setting on late sessions and up to 4% worse than H2O on the others.</p>
 
   <h2>Result 4: why I wouldn't actually use it</h2>
   <figure>
@@ -228,7 +231,7 @@
       <img src="figures/selection-light.svg" width="760" height="230" alt="Bar chart: selection takes under 1 percent of decode time for H2O, 19 percent for the R-KV-style baseline and 71 percent for the redundancy objective">
     </picture>
   </figure>
-  <p>Picking what to evict isn't free. H2O's choice is basically a sort. Mine has to compare cached tokens against each other in every attention head, and at a 12.5% budget that took <strong>71% of decode time</strong>. Throughput dropped to 78 tok/s, which is worse than not evicting at all (190). A 1% accuracy gain doesn't pay for that.</p>
+  <p>Picking what to evict isn't free. H2O's choice is basically a sort. Mine has to compare cached tokens against each other in every attention head, and at a 12.5% budget that took <strong>71% of decode time</strong>. Throughput dropped to 78 tok/s, which is worse than not evicting at all (190). A 1–2% perplexity gain doesn't pay for that.</p>
 </section>
 
 <section>
