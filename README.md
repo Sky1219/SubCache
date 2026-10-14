@@ -54,27 +54,37 @@ fitting more sequences in memory.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="figures/redundancy-dark.svg">
-  <img src="figures/redundancy-light.svg" alt="Line chart: the redundancy objective is 0.2 to 1.4 percent better than H2O on agent tokens, more so at smaller budgets">
+  <img src="figures/redundancy-light.svg" alt="Line chart: on agent tokens the redundancy objective is 0.2 to 0.5 percent better than H2O with weight 0.25 and 1.1 to 2.5 percent better with weight 1.0, more so at smaller budgets">
 </picture>
 
-A little. On agent sessions it beat H2O at every budget I tried, and the gap grew as the budget
-shrank, but we're talking 0.2% to 1.4% lower perplexity on the agent's own tokens.
+A little. On late agent sessions it beat H2O at every budget I tried, and the gap grew as the
+budget shrank. With the redundancy weight I picked in advance (0.25) that's 0.2% to 0.5% lower
+perplexity on the agent's own tokens.
+
+A smaller sweep said to turn the weight all the way up to 1.0, so I reran that on the full
+8,192-token setup. It held up: 1.1% to 2.5% better than H2O, which closes about a fifth of the
+gap to the full cache at a 25% budget and a tenth at 12.5%. At those budgets it ties the R-KV-style
+baseline, and below them it beats it easily. But that was the only dataset where it helped.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="figures/repetition-dark.svg">
   <img src="figures/repetition-light.svg" alt="Bar chart: the redundancy objective improves on H2O only on late agent sessions, not on session starts or WikiText">
 </picture>
 
-The part I find most convincing is where it helps. I measured how repetitive each dataset is
-(how often a run of 16 tokens has already appeared earlier in the same sequence):
+I measured how repetitive each dataset is (how often a run of 16 tokens has already appeared
+earlier in the same sequence):
 
-| Data | Repetition | Did my method help? |
-|---|---|---|
-| WikiText | 0.2% | No |
-| Start of an agent session | 8% | No |
-| 24k tokens into an agent session | 26% | Yes, at every budget |
+| Data | Repetition | Weight 0.25 | Weight 1.0 |
+|---|---|---|---|
+| WikiText | 0.2% | No | Mixed |
+| Start of an agent session | 8% | No | Worse |
+| First 16k tokens of an agent session | 16% | No | Worse |
+| 24k tokens into an agent session | 26% | Yes, at every budget | Yes, at every budget |
 
-It only helps where there is redundancy to remove, which is what the math says should happen.
+It only helps on the most repetitive data, which fits the idea. But the 16k sessions are pretty
+repetitive too and it didn't help there, so this number alone doesn't tell you when it will work.
+A higher weight makes the trade sharper: 1.0 is the best setting on late sessions and up to 4%
+worse than H2O everywhere else.
 
 ## Why I wouldn't actually use it
 
@@ -86,7 +96,7 @@ It only helps where there is redundancy to remove, which is what the math says s
 Picking what to evict isn't free. H2O's choice is basically a sort. Mine has to compare cached
 tokens against each other in every attention head, and at a 12.5% budget that took 71% of the
 decode time. Throughput dropped to 78 tok/s, which is worse than not evicting at all (190). A
-1% accuracy gain doesn't pay for that.
+1–2% perplexity gain doesn't pay for that.
 
 ## Limitations
 
