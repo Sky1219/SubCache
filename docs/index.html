@@ -232,14 +232,60 @@
     </picture>
   </figure>
   <p>Picking what to evict isn't free. H2O's choice is basically a sort. Mine has to compare cached tokens against each other in every attention head, and at a 12.5% budget that took <strong>71% of decode time</strong>. Throughput dropped to 78 tok/s, which is worse than not evicting at all (190). A 1–2% perplexity gain doesn't pay for that.</p>
+  <h2>Result 5: what happens on real tasks</h2>
+  <p>Perplexity only goes so far, so I also checked whether the policies change actual answers. These ran on the RTX A6000 in bf16 with bigger models, and WFL is the λ = 1 version. Every task is a small subset (details under Limitations), so treat this as a first look, not a leaderboard entry.</p>
+  <p>For LongBench and the RULER-style tasks the model reads the whole prompt, the cache is cut down to the budget once, and then it answers with nothing else evicted. Budgets are a share of the prompt, and scores are each task's own metric out of 100. Best compressed method per column in blue.</p>
+
+  <h3>RULER-style retrieval</h3>
+  <p class="note">Llama-3.1-8B-Instruct, 8,192-token prompts, 5 needle and variable-tracking tasks × 10 examples. Full cache: 92.8.</p>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th></th><th>50%</th><th>25%</th><th>12.5%</th><th>6.25%</th></tr></thead>
+    <tbody>
+      <tr><td>Window</td><td class="num">51.6</td><td class="num">31.7</td><td class="num">18.7</td><td class="num">8.7</td></tr>
+      <tr><td>H2O</td><td class="num">59.7</td><td class="num">26.4</td><td class="num">11.7</td><td class="num">4.9</td></tr>
+      <tr><td>R-KV-style</td><td class="num yes">90.8</td><td class="num yes">93.6</td><td class="num yes">91.6</td><td class="num yes">91.1</td></tr>
+      <tr><td>WFL</td><td class="num">59.3</td><td class="num">38.7</td><td class="num">14.9</td><td class="num">4.1</td></tr>
+    </tbody>
+  </table></div>
+  <p>The R-KV-style baseline scores tokens by how much the question (the last 32 prompt tokens) attends to them, so it keeps the needle at every budget. H2O and WFL use attention summed over the whole prompt and lose it. WFL is built on H2O's scores, so being redundancy-aware can't fix that.</p>
+
+  <h3>LongBench</h3>
+  <p class="note">Llama-3.1-8B-Instruct, prompts cut to 16k tokens. qasper, multifieldqa_en, hotpotqa and lcc with 20 examples each, gov_report with 10; average over the 5 tasks. Full cache: 51.8.</p>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th></th><th>50%</th><th>25%</th><th>12.5%</th><th>6.25%</th></tr></thead>
+    <tbody>
+      <tr><td>Window</td><td class="num">43.2</td><td class="num">40.1</td><td class="num">37.0</td><td class="num">33.4</td></tr>
+      <tr><td>H2O</td><td class="num">51.0</td><td class="num">46.9</td><td class="num">44.8</td><td class="num">41.0</td></tr>
+      <tr><td>R-KV-style</td><td class="num yes">51.8</td><td class="num yes">50.2</td><td class="num yes">49.1</td><td class="num yes">44.4</td></tr>
+      <tr><td>WFL</td><td class="num">51.2</td><td class="num">48.0</td><td class="num">46.4</td><td class="num">41.4</td></tr>
+    </tbody>
+  </table></div>
+  <p>WFL lands between H2O and R-KV-style, and on every individual task it was statistically tied with H2O. R-KV-style was clearly better on two of the QA tasks at some budgets, but clearly worse than H2O on summarization (gov_report) at 25% and below, where WFL stayed level with H2O. That fits the idea: a summary needs coverage of the whole document.</p>
+
+  <h3>MATH-500 with chain-of-thought</h3>
+  <p class="note">DeepSeek-R1-Distill-Qwen-1.5B, 20 problems from levels 1 and 2, one sample each, capped at 4,096 generated tokens. The cache is cut back every 64 generated tokens and the budget is a number of slots. Accuracy in percent; full cache: 55.</p>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th></th><th>2048</th><th>1024</th><th>512</th><th>256</th></tr></thead>
+    <tbody>
+      <tr><td>Window</td><td class="num">60</td><td class="num">60</td><td class="num">25</td><td class="num">15</td></tr>
+      <tr><td>H2O</td><td class="num">55</td><td class="num">60</td><td class="num">65</td><td class="num">45</td></tr>
+      <tr><td>R-KV-style</td><td class="num yes">70</td><td class="num">45</td><td class="num">45</td><td class="num">40</td></tr>
+      <tr><td>WFL</td><td class="num">60</td><td class="num yes">65</td><td class="num yes">70</td><td class="num yes">50</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout">
+    <p style="margin:0">This one is too noisy to rank. Half of the full-cache runs hit the 4,096-token cap before answering, so the scores mostly say whether the model finished thinking in time. WFL was 5 points above H2O at every budget, but every interval was about ±20 points. The only clear results: Window falls apart at 512 and 256 slots, and R-KV-style was worse than H2O at 512.</p>
+  </div>
+  <p>The obvious next step is WFL with question-window weights instead of H2O's, which might keep the retrieval wins and the summary coverage at once. I haven't run that.</p>
 </section>
 
 <section>
   <h2>Limitations</h2>
   <ul>
     <li>Because the machine was CPU bound, the true effect of a smaller cache on step speed is hard to know: decode speed was identical at every cache size.</li>
-    <li>These are small models (1.3B and 1.1B parameters).</li>
-    <li>I measured perplexity, not whether an agent actually finishes its task.</li>
+    <li>The perplexity results use small models (1.3B and 1.1B parameters), and perplexity isn't the same as an agent actually finishing its task.</li>
+    <li>The task benchmarks use bigger models but small subsets: 10 to 20 examples per task, LongBench prompts cut to 16k tokens, only the easiest MATH levels, a 4,096-token generation cap and one sample per problem. Many of their intervals are ±10 points or wider.</li>
+    <li>The RULER-style tasks are my own reimplementation with a WikiText haystack. To keep selection fast on long prompts, WFL only chose among the older tokens that H2O ranks highest, twice as many as it had slots to fill. None of the task numbers should be compared with published tables, and I didn't report their timings because the GPU was shared with other jobs.</li>
   </ul>
 
   <h2>Run it yourself</h2>
@@ -248,8 +294,13 @@ python tests/test_policies.py
 python scripts/gate.py                              # needs a GPU
 python scripts/run_eviction.py --n-seqs 8           # small sweep on WikiText
 python scripts/analyze.py results/batch/core8k_late.jsonl --masked
-python scripts/make_figures.py</code></pre>
-  <p>The engine is in <code>subcache/engine.py</code>, the eviction policies in <code>subcache/policies.py</code>, and the evaluations in <code>subcache/evals.py</code>. Every number on this page comes from the raw results in <code>results/</code>.</p>
+python scripts/make_figures.py
+
+# task benchmarks (A6000-sized GPU; also needs rouge, fuzzywuzzy, math-verify)
+bash scripts/bench_all.sh long                      # RULER-style tasks, then LongBench
+bash scripts/bench_all.sh math                      # MATH-500
+python scripts/analyze_bench.py results/bench/longbench_llama31.jsonl</code></pre>
+  <p>The engine is in <code>subcache/engine.py</code>, the eviction policies in <code>subcache/policies.py</code>, and the evaluations in <code>subcache/evals.py</code>; the task benchmarks are in <code>subcache/benchmarks.py</code> and <code>subcache/longctx.py</code>. Every number on this page comes from the raw results in <code>results/</code>.</p>
 
   <h2>Credit</h2>
   <ul>
@@ -257,6 +308,9 @@ python scripts/make_figures.py</code></pre>
     <li>PRISM: Kothawade et al., AAAI 2022</li>
     <li>R-KV: Cai et al., NeurIPS 2025</li>
     <li>Agent trajectories: <code>nebius/SWE-rebench-openhands-trajectories</code> (CC-BY-4.0)</li>
+    <li>LongBench: Bai et al., ACL 2024</li>
+    <li>RULER: Hsieh et al., COLM 2024</li>
+    <li>MATH: Hendrycks et al., NeurIPS 2021 (MATH-500 subset from Lightman et al., 2023)</li>
   </ul>
 </section>
 

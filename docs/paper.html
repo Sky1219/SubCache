@@ -82,7 +82,7 @@
 
 <section class="abstract">
   <h2>Abstract</h2>
-  <p>Long contexts make the key-value (KV) cache the main memory cost of LLM inference, and evicting cached tokens is a common way to fit more sequences on a GPU. The standard heuristic, H2O, keeps the tokens that have received the most attention. That rule cannot tell when two cached tokens carry the same information, which happens constantly in coding-agent sessions, where the same files and logs are read again and again. I add a weighted facility-location term to H2O's score, so the kept set must <em>cover</em> every important token rather than simply contain the highest-scoring ones. On 8,192-token windows from real agent sessions with deepseek-coder-1.3b, the objective lowers perplexity on the agent's own tokens relative to H2O at every budget from 25% down to 3.1%, with 95% intervals that exclude zero: by 0.2% to 0.5% at the pre-chosen redundancy weight, and by 1.1% to 2.5% with pure facility location, a setting picked from an ablation and then confirmed on the full setup. The gain appears only on the most repetitive text. It is absent on WikiText, at the start of sessions and on 16,000-token sessions, where the stronger setting is up to 4% worse than H2O. But selection is expensive: at a 12.5% budget it takes 71% of decode time and cuts throughput below the no-eviction baseline. Separately, eviction with H2O gives 2.8× throughput at a 25% budget for about 5% higher perplexity, and on this machine all of that gain comes from fitting more sequences in memory, because decoding is bound by CPU kernel launches rather than by the GPU.</p>
+  <p>Long contexts make the key-value (KV) cache the main memory cost of LLM inference, and evicting cached tokens is a common way to fit more sequences on a GPU. The standard heuristic, H2O, keeps the tokens that have received the most attention. That rule cannot tell when two cached tokens carry the same information, which happens constantly in coding-agent sessions, where the same files and logs are read again and again. I add a weighted facility-location term to H2O's score, so the kept set must <em>cover</em> every important token rather than simply contain the highest-scoring ones. On 8,192-token windows from real agent sessions with deepseek-coder-1.3b, the objective lowers perplexity on the agent's own tokens relative to H2O at every budget from 25% down to 3.1%, with 95% intervals that exclude zero: by 0.2% to 0.5% at the pre-chosen redundancy weight, and by 1.1% to 2.5% with pure facility location, a setting picked from an ablation and then confirmed on the full setup. The gain appears only on the most repetitive text. It is absent on WikiText, at the start of sessions and on 16,000-token sessions, where the stronger setting is up to 4% worse than H2O. But selection is expensive: at a 12.5% budget it takes 71% of decode time and cuts throughput below the no-eviction baseline. Separately, eviction with H2O gives 2.8× throughput at a 25% budget for about 5% higher perplexity, and on this machine all of that gain comes from fitting more sequences in memory, because decoding is bound by CPU kernel launches rather than by the GPU. Small task benchmarks with larger models agree on summarization, where WFL holds level with H2O, and disagree on retrieval: on RULER-style needle tasks, scoring tokens by attention from the question matters far more than redundancy, and an R-KV-style baseline that does so beats both H2O and WFL by more than 30 points at every budget.</p>
 </section>
 
 <h2>1. Introduction</h2>
@@ -242,9 +242,42 @@
 </figure>
 <p>H2O's selection is a top-<i>k</i> and takes under 1% of decode time, about 0.6 ms per eviction. WFL builds a similarity matrix over the candidates of every head and takes about 0.6 s per eviction at a 12.5% budget, roughly a thousand times longer, which is 71% of decode time. At batch 8, the largest tested for WFL, throughput is 78 tokens/s, below the 190 tokens/s of not evicting at all, and selection's share of time grows with batch size (24% at batch 1, 71% at batch 8), so larger batches would not rescue it. The R-KV-style baseline sits in between at 19%. A 1% quality gain does not pay for this.</p>
 
+<h3>5.6 Task benchmarks</h3>
+<p>Perplexity under teacher forcing does not show whether eviction changes a model's answers, so I ran three small task benchmarks on the RTX A6000 in bf16 with larger models. All policies keep the same sinks and recent half as before; WFL uses λ = 1. For LongBench [6] and the RULER-style tasks [7] I use one-shot prompt compression: the prompt is prefilled with the full cache, each policy cuts it to the budget once (a share of the prompt), and the answer is decoded greedily with no further eviction. The R-KV-style baseline's 32-query window is then the end of the prompt, which holds the question. For prompts this long, WFL considers only the older candidates with the highest H2O scores, twice as many as it has slots to fill, and prunes in at most 64 rounds. For MATH-500 [8] the cache is cut back every 64 generated tokens, with the budget given in slots, and all policies decode with the same random numbers (temperature 0.6, top-<i>p</i> 0.95) so that comparisons are paired. Differences from H2O use the same paired bootstrap over examples as above.</p>
+<div class="tbl">
+  <p class="tcap"><b>Table 4.</b> Task scores out of 100 (MATH: accuracy in percent). <span class="g">Blue</span>: best compressed method in each column. (a) RULER-style, Llama-3.1-8B-Instruct, 8,192-token prompts, five needle and variable-tracking tasks × 10 examples, full cache 92.8. (b) LongBench, Llama-3.1-8B-Instruct, prompts truncated in the middle to 16k tokens, mean of five task means (qasper, multifieldqa_en, hotpotqa and lcc with 20 examples; gov_report with 10), full cache 51.8. (c) MATH-500, DeepSeek-R1-Distill-Qwen-1.5B, 20 problems from levels 1–2, one sample each, 4,096-token cap, full cache 55.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>(a) RULER-style</th><th>50%</th><th>25%</th><th>12.5%</th><th>6.25%</th></tr></thead>
+    <tbody>
+      <tr><td>Recency</td><td>51.6</td><td>31.7</td><td>18.7</td><td>8.7</td></tr>
+      <tr><td>H2O</td><td>59.7</td><td>26.4</td><td>11.7</td><td>4.9</td></tr>
+      <tr><td>R-KV-style</td><td class="g">90.8</td><td class="g">93.6</td><td class="g">91.6</td><td class="g">91.1</td></tr>
+      <tr><td>WFL, λ = 1</td><td>59.3</td><td>38.7</td><td>14.9</td><td>4.1</td></tr>
+    </tbody>
+    <thead><tr><th>(b) LongBench</th><th>50%</th><th>25%</th><th>12.5%</th><th>6.25%</th></tr></thead>
+    <tbody>
+      <tr><td>Recency</td><td>43.2</td><td>40.1</td><td>37.0</td><td>33.4</td></tr>
+      <tr><td>H2O</td><td>51.0</td><td>46.9</td><td>44.8</td><td>41.0</td></tr>
+      <tr><td>R-KV-style</td><td class="g">51.8</td><td class="g">50.2</td><td class="g">49.1</td><td class="g">44.4</td></tr>
+      <tr><td>WFL, λ = 1</td><td>51.2</td><td>48.0</td><td>46.4</td><td>41.4</td></tr>
+    </tbody>
+    <thead><tr><th>(c) MATH-500 (slots)</th><th>2048</th><th>1024</th><th>512</th><th>256</th></tr></thead>
+    <tbody>
+      <tr><td>Recency</td><td>60</td><td>60</td><td>25</td><td>15</td></tr>
+      <tr><td>H2O</td><td>55</td><td>60</td><td>65</td><td>45</td></tr>
+      <tr><td>R-KV-style</td><td class="g">70</td><td>45</td><td>45</td><td>40</td></tr>
+      <tr><td>WFL, λ = 1</td><td>60</td><td class="g">65</td><td class="g">70</td><td class="g">50</td></tr>
+    </tbody>
+  </table></div>
+</div>
+<p><b>Retrieval.</b> The R-KV-style baseline keeps the needle at every budget, while H2O and WFL lose it, both falling below 15 at a 12.5% budget. The deciding factor is which attention is counted, not redundancy: attention from the question finds the needle, and attention accumulated over the whole prompt does not. WFL inherits H2O's weights and cannot recover it. This is the GCMI-versus-H2O distinction from Section 6, with the opposite outcome from perplexity on late agent sessions.</p>
+<p><b>LongBench.</b> WFL averages between H2O and R-KV-style, and on every individual task its difference from H2O has an interval that includes zero. R-KV-style is significantly better than H2O on multifieldqa_en at 25% and below (+9 to +14) and on qasper at 25% (+8), but significantly worse on gov_report at 25% and below (−3.4 to −4.5), where WFL is level with H2O (within 0.6). Summarization needs coverage of the whole document, which question-window importance does not reward and facility location does. With 10 to 20 examples per task this is suggestive rather than settled.</p>
+<p><b>Reasoning.</b> The MATH run is dominated by the generation cap: half of the full-cache samples hit 4,096 tokens without a final answer, so accuracy mostly measures whether the model finished in time. WFL is 5 points above H2O at every budget, with intervals of about ±20 points. Recency falls 30 to 40 points behind H2O at 512 and 256 slots, and R-KV-style is 20 points behind at 512; those are the only intervals that exclude zero. R-KV [4] reports its method doing well on reasoning traces, but this baseline is not a reproduction (Section 2), and this run is too small and too truncated to test that either way.</p>
+
 <h2>6. Discussion</h2>
 <p><b>Is the idea right?</b> Partly. The diminishing-returns structure does what it should on the most redundant context: it helps, more so at tight budgets. But H2O is a very strong baseline. On late agent windows at a 12.5% budget, H2O is 13% worse than the full cache on agent tokens (paired), and WFL closes about 5% of that gap at λ = 0.5 and 11% at λ = 1. The stronger setting is not free either: it costs perplexity on every other dataset, so in practice the weight would have to depend on how redundant the context is, which would need its own estimate.</p>
 <p><b>Making it cheap.</b> The cost comes from computing all-pairs similarity per head at every eviction. Ways to cut it: compute similarity on a low-dimensional sketch of the keys; restrict it to the few hundred tokens H2O is about to keep or drop rather than all candidates; share one selection across the heads of a layer, as R-KV does; or evict less often with a larger slack. The ablations suggest the quality survives coarser optimization (32 slots per step loses little at 25%), so there is room to trade accuracy for speed.</p>
+<p><b>Which importance to cover.</b> The task benchmarks suggest that the facility-location term and the importance weights are separate choices. Question-window weights win on retrieval and QA, and coverage helps on summarization, so WFL with question-window weights instead of H2O's is the obvious combination. I have not run it.</p>
 <p><b>A side observation.</b> On WikiText and agent starts at a 3.1% budget, windowed H2O (GCMI) beat full-history H2O by about 4% on all tokens, but it was 2% to 4% worse on late agent windows. Which notion of importance is right seems to depend on how far back the text needs to reach, which the repetition measure partly captures.</p>
 
 <h2>7. Limitations</h2>
@@ -252,12 +285,13 @@
   <li>The machine was CPU-bound, so the decode step was about 21 ms at every cache size. The latency benefit of a smaller cache on a memory-bound decoder could not be measured, and throughput comparisons reflect only batch capacity.</li>
   <li>The models are small (1.3B and 1.1B parameters). Larger models have more heads and longer useful context, and both the gain and the cost may scale differently.</li>
   <li>The quality metric is perplexity under teacher forcing, not whether an agent completes its task. Small perplexity differences may or may not change behaviour.</li>
+  <li>The task benchmarks are small subsets: 10 examples per RULER-style task at one length, 10 to 20 per LongBench task with prompts truncated to 16k tokens, and 20 MATH problems from the two easiest levels with a 4,096-token cap and one sample each. Many intervals are ±10 points or wider. The RULER-style tasks are my own reimplementation with a WikiText haystack, and WFL used a restricted candidate pool on long prompts. None of these numbers are comparable to published tables. Their timings are not reported because the GPU was shared with other jobs.</li>
   <li>The R-KV-style baseline is not a faithful reproduction of R-KV.</li>
   <li>Hyperparameters (λ, <i>p</i>, pruning step) were explored on 4k windows of the same data source used for the main results, though on different windows. λ = 1 was chosen after seeing those results and checked once on the 8k setup with a rule set in advance; it passed at two budgets on one dataset.</li>
 </ul>
 
 <h2>8. Conclusion</h2>
-<p>Adding a weighted facility-location term to H2O makes KV-cache eviction redundancy-aware. On the most repetitive coding-agent context it gives a small but consistent improvement over H2O that grows as the budget shrinks, up to 2.5% with pure facility location, and on less repetitive text it gives nothing or makes things worse. As implemented, selection is far too slow to use. The more practical finding is about the hardware: on this machine, eviction speeds things up only because more sequences fit in memory. A cheaper approximation of the objective, measured on a GPU-bound setup and against task success rather than perplexity, is the natural next step.</p>
+<p>Adding a weighted facility-location term to H2O makes KV-cache eviction redundancy-aware. On the most repetitive coding-agent context it gives a small but consistent improvement over H2O that grows as the budget shrinks, up to 2.5% with pure facility location, and on less repetitive text it gives nothing or makes things worse. As implemented, selection is far too slow to use. The more practical finding is about the hardware: on this machine, eviction speeds things up only because more sequences fit in memory. On small task benchmarks it ties H2O on LongBench and does not help retrieval, where what matters is weighting tokens by attention from the question. A cheaper approximation of the objective with question-window weights, measured on a GPU-bound setup and on larger task sets, is the natural next step.</p>
 
 <h2>References</h2>
 <ol class="refs">
@@ -266,6 +300,9 @@
   <li>S. Kothawade et al. PRISM: A Rich Class of Parameterized Submodular Information Measures for Guided Data Subset Selection. AAAI 2022.</li>
   <li>Z. Cai et al. R-KV: Redundancy-aware KV Cache Compression for Reasoning Models. NeurIPS 2025.</li>
   <li>Nebius. SWE-rebench OpenHands trajectories (<code>nebius/SWE-rebench-openhands-trajectories</code>). CC-BY-4.0.</li>
+  <li>Y. Bai et al. LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding. ACL 2024.</li>
+  <li>C.-P. Hsieh et al. RULER: What's the Real Context Size of Your Long-Context Language Models? COLM 2024.</li>
+  <li>D. Hendrycks et al. Measuring Mathematical Problem Solving With the MATH Dataset. NeurIPS 2021. MATH-500 subset from H. Lightman et al., Let's Verify Step by Step, 2023.</li>
 </ol>
 
 <h2>Appendix: reproducing the results</h2>
@@ -274,8 +311,13 @@ python tests/test_policies.py
 python scripts/gate.py                              # correctness gate, needs a GPU
 python scripts/run_eviction.py --n-seqs 8           # small sweep on WikiText
 python scripts/analyze.py results/batch/core8k_late.jsonl --masked
-python scripts/make_figures.py</code></pre>
-<p class="note">Every number above comes from the raw results in <code>results/batch/</code> of the <a href="https://github.com/Sky1219/SubCache">repository</a>: <code>core8k_*.jsonl</code> for Tables 1 and 2, <code>core4k_late.jsonl</code> and <code>sweep_*.jsonl</code> for Table 3, <code>long16k.jsonl</code>, <code>core8k_late_n96.jsonl</code>, and <code>speed.jsonl</code> for Sections 5.1 and 5.5.</p>
+python scripts/make_figures.py
+
+# task benchmarks (Section 5.6; also needs rouge, fuzzywuzzy, math-verify)
+bash scripts/bench_all.sh long                      # RULER-style tasks, then LongBench
+bash scripts/bench_all.sh math                      # MATH-500
+python scripts/analyze_bench.py results/bench/ruler_llama31.jsonl</code></pre>
+<p class="note">Every number above comes from the raw results in <code>results/batch/</code> of the <a href="https://github.com/Sky1219/SubCache">repository</a>: <code>core8k_*.jsonl</code> for Tables 1 and 2, <code>core4k_late.jsonl</code> and <code>sweep_*.jsonl</code> for Table 3, <code>long16k.jsonl</code>, <code>core8k_late_n96.jsonl</code>, and <code>speed.jsonl</code> for Sections 5.1 and 5.5. Table 4 comes from <code>results/bench/</code>: <code>ruler_llama31.jsonl</code>, <code>longbench_llama31.jsonl</code> and <code>math500_r1qwen15.jsonl</code>.</p>
 
 <footer>This project was built and written with Claude. <a href="./">Back to the overview</a></footer>
 

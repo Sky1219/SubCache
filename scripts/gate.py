@@ -31,7 +31,9 @@ FILLER = (
     "The history of the printing press begins in the fifteenth century, when movable type "
     "changed how books were made, copied, and shared across Europe and beyond. "
 ) * 200
-NEAR_TIE = 0.05
+# A divergence counts as a near-tie when the top-2 logit gap is below this. bf16 keeps 8 mantissa
+# bits, so at logits of 16-32 one step is 0.125 and two paths can legitimately differ by that much.
+NEAR_TIE = {"float16": 0.05, "float32": 0.05, "bfloat16": 0.25}
 
 
 def eos_ids(model, tok):
@@ -61,8 +63,8 @@ def top2_gap(model, tok, ids, ref_new, step):
     prefix = torch.cat([ids, ref_new[:step].unsqueeze(0)], dim=1)
     with torch.inference_mode():
         logits = model(prefix).logits[0, -1].float()
-    logits[eos_ids(model, tok)] = float("-inf")
-    vals = torch.topk(logits, 2).values
+        logits[eos_ids(model, tok)] = float("-inf")
+        vals = torch.topk(logits, 2).values
     return (vals[0] - vals[1]).item()
 
 
@@ -70,7 +72,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     ap.add_argument("--device", default="cuda:0")
-    ap.add_argument("--dtype", default="float16", choices=["float16", "float32"])
+    ap.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32"])
     ap.add_argument("--max-new", type=int, default=128)
     ap.add_argument("--lengths", type=int, nargs="*", default=[128, 512, 1024, 1900])
     ap.add_argument("--batch", type=int, default=4, help="rows in the batched-decode check; 1 skips it")
@@ -125,7 +127,7 @@ def main():
         else:
             step = (new != ref_new).nonzero()[0].item()
             gap = top2_gap(model, tok, ids, ref_new, step)
-            if gap < NEAR_TIE:
+            if gap < NEAR_TIE[args.dtype]:
                 ties += 1
                 status = f"near-tie at step {step} (top-2 gap {gap:.4f})"
             else:
@@ -148,7 +150,7 @@ def main():
                     continue
                 step = (new[b] != ref_new[b]).nonzero()[0].item()
                 gap = top2_gap(model, tok, ids[b:b + 1], ref_new[b], step)
-                if gap < NEAR_TIE:
+                if gap < NEAR_TIE[args.dtype]:
                     ties += 1
                     status.append(f"near-tie at step {step} (gap {gap:.4f})")
                 else:
