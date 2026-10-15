@@ -106,7 +106,10 @@ is a small subset, listed below, so treat these as a first look rather than a le
 
 For LongBench and the RULER-style tasks the model reads the whole prompt, the cache is cut down to
 the budget once, and then it answers with nothing else evicted. Budgets are a share of the prompt.
-Scores are each task's own metric out of 100.
+Scores are each task's own metric out of 100. Like in SnapKV-style evaluations, the first answer
+token comes from the full cache, so every method gets it for free. On the RULER-style tasks that
+token is only punctuation, but on LongBench's short-answer tasks it can be the whole answer (a
+fifth to over a third of the answers there are one word), which narrows the gaps between methods.
 
 **RULER-style retrieval** (Llama-3.1-8B-Instruct, 8,192-token prompts, 5 tasks × 10 examples,
 full cache 92.8):
