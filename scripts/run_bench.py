@@ -7,12 +7,14 @@
   math       MATH-500 with chain-of-thought from a reasoning model, eviction every `interval`
              generated tokens, budgets in slots, top-p sampling with common random numbers.
 
-Writes one JSON line per example (all policies and budgets together) and skips examples
-already in --out, so a stopped run resumes where it left off. Summarize with
-scripts/analyze_bench.py.
+Writes one JSON line per example (all policies and budgets together). Each record carries the
+settings that affect its scores and a short hash of them ("config"). A rerun skips examples
+already in --out with the same config, so a stopped run resumes where it left off; records
+from other settings are kept but not reused. Summarize with scripts/analyze_bench.py.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -44,13 +46,42 @@ def policy_kw(policy, args, compress=False):
     return kw
 
 
-def done_keys(path):
-    keys = set()
-    if os.path.exists(path):
-        with open(path) as f:
-            for line in f:
-                r = json.loads(line)
-                keys.add((r["task"], r.get("length"), r["idx"]))
+# Arguments that only choose which examples run, or how memory is chunked, not what they score.
+NOT_RESULT_SETTINGS = ("out", "device", "tasks", "limit", "lengths", "levels", "sim_bytes")
+
+
+def result_settings(args, eos):
+    """The settings a record's scores depend on, and a short hash of them."""
+    s = {k: v for k, v in vars(args).items() if k not in NOT_RESULT_SETTINGS}
+    s["eos"] = eos
+    return s, hashlib.sha1(json.dumps(s, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def read_records(path):
+    """Records in path. A last line cut off by a killed run is dropped from the file, so the
+    next append starts on a fresh line."""
+    if not os.path.exists(path):
+        return []
+    with open(path, "rb") as f:
+        data = f.read()
+    lines = data.split(b"\n")
+    if lines[-1].strip():  # no newline at the end: the last write never finished
+        print(f"{path}: dropping an incomplete last line ({len(lines[-1])} bytes)", flush=True)
+        with open(path, "r+b") as f:
+            f.truncate(len(data) - len(lines[-1]))
+    return [json.loads(line) for line in lines[:-1] if line.strip()]
+
+
+def done_keys(path, config):
+    """(task, length, idx) of the records in path made with `config`."""
+    keys, other = set(), 0
+    for r in read_records(path):
+        if r.get("config") == config:
+            keys.add((r["task"], r.get("length"), r["idx"]))
+        else:
+            other += 1
+    if other:
+        print(f"{path}: {other} records come from other settings; they are kept but not reused", flush=True)
     return keys
 
 
@@ -90,9 +121,8 @@ def compress_and_decode(engine, tok, ids, max_gen, eos, args):
     return results, n, prefill_s
 
 
-def run_math(engine, tok, args, eos, out):
+def run_math(engine, tok, args, eos, out, settings, config, done):
     rows = B.load_math500(limit=args.limit, seed=args.seed, levels=args.levels)
-    done = done_keys(args.out)
     configs = [{"policy": "full", "capacity": 0}] + [
         dict(policy=p, capacity=int(b), **policy_kw(p, args)) for b in args.budgets for p in args.policies]
     batch = len(configs)
@@ -127,7 +157,7 @@ def run_math(engine, tok, args, eos, out):
                             "select_s": s, "evictions": ne})
         rec = {"task": "math500", "length": None, "idx": row["unique_id"], "level": row.get("level"),
                "subject": row.get("subject"), "answer": row["answer"], "n_tokens": len(ids), "wall_s": wall,
-               "results": results}
+               "results": results, "config": config, "settings": settings}
         out.write(json.dumps(rec) + "\n")
         out.flush()
         acc = {r["policy"] + "@" + str(r["budget"]): int(r["correct"]) for r in results}
@@ -135,7 +165,7 @@ def run_math(engine, tok, args, eos, out):
               f"full={acc['full@1.0']} correct={sum(acc.values())}/{len(acc)}", flush=True)
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bench", required=True, choices=["longbench", "ruler", "math"])
     ap.add_argument("--model", required=True)
@@ -155,7 +185,7 @@ def main():
     ap.add_argument("--mix", type=float, default=1.0)
     ap.add_argument("--prune-step", type=int, default=8)
     ap.add_argument("--prune-rounds", type=int, default=64)
-    ap.add_argument("--pool", type=float, default=2.0)
+    ap.add_argument("--pool", type=float, default=2.0, help="wfl candidate pool, a multiple (>= 1) of the slots to fill")
     ap.add_argument("--sim-bytes", type=float, default=6e9, help="memory for wfl similarity matrices at once")
     ap.add_argument("--lam", type=float, default=0.1)
     ap.add_argument("--rkv-chunk", type=int, default=1)
@@ -165,23 +195,29 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.6)
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--seed", type=int, default=0)
+    return ap
+
+
+def main():
+    ap = build_parser()
     args = ap.parse_args()
+    if args.pool and args.pool < 1:
+        ap.error("--pool must be at least 1 (or 0 for no pool): a smaller pool keeps fewer slots than the budget")
 
     dtype = getattr(torch, args.dtype)
     tok, model = load_model(args.model, args.device, dtype)
     engine = Engine(model)
     eos = eos_ids(model, tok)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    settings = dict(vars(args))
-    settings["eos"] = eos
-    settings["gpu"] = torch.cuda.get_device_name(engine.device)
-    print(json.dumps(settings), flush=True)
+    settings, config = result_settings(args, eos)
+    settings["gpu"] = torch.cuda.get_device_name(engine.device)  # recorded, not part of the hash
+    print(json.dumps(dict(vars(args), eos=eos, gpu=settings["gpu"], config=config)), flush=True)
 
+    done = done_keys(args.out, config)
     with open(args.out, "a") as out:
         if args.bench == "math":
-            run_math(engine, tok, args, eos, out)
+            run_math(engine, tok, args, eos, out, settings, config, done)
             return
-        done = done_keys(args.out)
         if args.bench == "longbench":
             jobs = [(task, None, i, row) for task in (args.tasks or list(B.LONGBENCH_PROMPT))
                     for i, row in enumerate(B.load_longbench(task, limit=args.limit))]
@@ -208,7 +244,8 @@ def main():
                 r["score"] = (B.longbench_score(task, r["pred"], answers) if args.bench == "longbench"
                               else B.ruler_score(r["pred"], answers))
             rec = {"task": task, "length": length, "idx": i, "n_tokens": n, "answers": answers, "prefill_s": prefill_s,
-                   "wall_s": time.perf_counter() - t0, "results": results, **extra}
+                   "wall_s": time.perf_counter() - t0, "results": results, **extra, "config": config,
+                   "settings": settings}
             out.write(json.dumps(rec) + "\n")
             out.flush()
             sc = {r["policy"] + "@" + str(r["budget"]): round(r["score"]) for r in results}

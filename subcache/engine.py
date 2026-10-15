@@ -57,6 +57,7 @@ class KVCache:
         self.length = 0
         self.pos = 0
         self.has_evicted = False  # any keep bit False among the slots in use (masked mode only)
+        self.is_row_view = False  # set on the views returned by row()
         self.bytes_per_slot = 2 * head_dim * self.k.element_size()  # one K and one V vector
         self.window = None
         self.win_size = 0
@@ -99,8 +100,10 @@ class KVCache:
 
     def row(self, b):
         """A shallow copy that reads and writes batch row b of this cache (as batch size 1).
-        Writes to its tensors land in this cache; counters such as has_evicted do not."""
+        Writes to its tensors land in this cache; counters such as has_evicted do not. A view
+        cannot be compacted: that would move this row's slots while length stays shared."""
         view = copy.copy(self)
+        view.is_row_view = True
         row = slice(b, b + 1)
         view.k, view.v, view.keep, view.score = self.k[:, row], self.v[:, row], self.keep[:, row], self.score[:, row]
         if self.window is not None:
@@ -114,6 +117,9 @@ class KVCache:
 
     def compact(self):
         """Pack the kept slots of every head to the front and drop the rest."""
+        if self.is_row_view:
+            raise RuntimeError("cannot compact a row view: the parent cache's length would no longer match "
+                               "the row's slots; use masked eviction (compact=False) on rows")
         n = self.length
         keep = self.keep[..., :n]
         live = int(keep.sum(-1).max())

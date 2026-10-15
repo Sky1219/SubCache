@@ -1,0 +1,16 @@
+model=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B dtype=bfloat16 device=NVIDIA RTX A6000 torch=2.11.0+cu128 transformers=5.18.0
+prefill logits max|diff| vs HF: 0.0000 (argmax agree at 100% of positions)
+  'The capital of France is'                   T=    5    44.3 ms/tok  MISMATCH at step 19 (top-2 gap 0.3750)
+  'World War Two ended in'                     T=    5    47.0 ms/tok  MATCH
+  'The best selling fruit in the worlds is'    T=    8    35.9 ms/tok  near-tie at step 26 (top-2 gap 0.1250)
+  'Bananas go well with'                       T=    5    35.9 ms/tok  near-tie at step 4 (top-2 gap 0.1250)
+  ' I love'                                    T=    2    35.9 ms/tok  MATCH
+  'def fibonacci(n):\n    '                    T=    5    32.8 ms/tok  near-tie at step 0 (top-2 gap 0.1250)
+  filler L=128                                 T=  128    24.7 ms/tok  MATCH
+  filler L=512                                 T=  512    24.8 ms/tok  MATCH
+  filler L=1900                                T= 1900    31.2 ms/tok  MATCH
+  filler L=3500                                T= 3500    51.6 ms/tok  MATCH
+  batch of 4, L=64: near-tie at step 4 (gap 0.0000); MATCH; near-tie at step 30 (gap 0.0625); near-tie at step 26 (gap 0.0000)
+  batch of 4, L=512: MATCH; MATCH; MATCH; MATCH
+11 exact, 6 near-tie, 1 real mismatch out of 18
+EXIT=1

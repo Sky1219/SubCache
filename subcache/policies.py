@@ -260,6 +260,8 @@ def evict(cache, policy, capacity, compact=False, **kw):
     """Evict down to `capacity` live slots per (layer, kv_head). Returns a stats dict, or None
     if nothing needed evicting. With compact=True the evicted slots are physically removed
     (see KVCache.compact); otherwise they are only masked. Selection options: select_keep."""
+    if compact and cache.is_row_view:  # checked before any keep bit changes
+        raise RuntimeError("cannot compact a row view (KVCache.row); evict rows with compact=False")
     new_keep, stats = select_keep(cache, policy, capacity, **kw)
     if new_keep is None:
         return None
@@ -295,6 +297,9 @@ def select_keep(cache, policy, capacity, recent_frac=0.5, sink=4, eta=1.0, psi="
       rkv_chunk    rkv only: heads scored at a time (default: a whole layer). Same result, less
                    memory: the per-head scores are averaged over the layer either way.
     """
+    if pool and pool < 1:
+        # A pool smaller than the slots to fill would keep fewer than `capacity` slots.
+        raise ValueError(f"pool must be at least 1 (or None), got {pool}")
     n = cache.length
     if policy == "full" or n <= capacity:
         return None, None

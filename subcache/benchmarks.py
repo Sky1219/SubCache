@@ -7,7 +7,9 @@ licence). Data: data.zip from the THUDM/LongBench dataset repo, unpacked under d
 RULER-style synthetic retrieval (after Hsieh et al., 2024): needle-in-a-haystack variants and
 variable tracking, with RULER's templates and its string-match-all score. This is a
 reimplementation, not the RULER package: the haystack is WikiText-2 instead of Paul Graham
-essays, and keys are adjective-noun pairs from a fixed list instead of the wonderwords package.
+essays, keys are adjective-noun pairs from a fixed list instead of the wonderwords package, and
+each needle reads "One of the special magic number for ..." where RULER writes "numbers". That
+wording was used for every reported run, so it is kept to stay comparable with them.
 
 MATH-500 (Lightman et al., 2023; HuggingFaceH4/MATH-500): DeepSeek-R1's recommended prompt and
 the last \\boxed{...} of the answer, graded with Math-Verify.
@@ -260,9 +262,10 @@ def last_boxed(text):
     i = text.rfind("\\boxed")
     if i < 0:
         return None
-    j = text.find("{", i)
-    if j < 0:
+    m = re.compile(r"\s*\{").match(text, i + len("\\boxed"))  # the brace must open the argument
+    if m is None:
         return None
+    j = m.end() - 1
     depth = 0
     for k in range(j, len(text)):
         depth += {"{": 1, "}": -1}.get(text[k], 0)
