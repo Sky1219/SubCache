@@ -183,7 +183,7 @@ def wfl_select(sim, w, cand, held, m, mix=0.5, eps=None, generator=None):
     return selected
 
 
-def wfl_prune(sim, w, cand, held, m, mix=0.5, step=8):
+def wfl_prune(sim, w, cand, held, m, mix=0.5, step=8, rounds=None):
     """Same objective as wfl_select, optimized from the other side: start with every candidate
     kept and repeatedly remove the `step` slots whose removal loses the least, until m remain.
 
@@ -191,14 +191,23 @@ def wfl_prune(sim, w, cand, held, m, mix=0.5, step=8):
     whose most similar kept slot is j. Cost is one top-2 over [P, n, n] per round, and the
     number of rounds is (slots to remove) / step, so it suits streaming eviction where each
     call removes few slots. No approximation guarantee (greedy removal), unlike wfl_select.
+
+    rounds caps the number of rounds by removing more per round when many slots must go, as when
+    a whole prompt is compressed at once: step becomes max(step, ceil(to_remove / rounds)).
     """
     kept = cand | held
     n_remove = int(cand.sum(1).min()) - m
+    if rounds:
+        step = max(step, math.ceil(n_remove / rounds))
     removed = 0
     while removed < n_remove:
-        top2 = sim.masked_fill(~kept[:, None, :], -1.0).topk(2, dim=-1)
-        best, second = top2.values[..., 0], top2.values[..., 1].clamp_min(0.0)
-        loss = torch.zeros_like(w).scatter_add_(1, top2.indices[..., 0], w * (best - second).clamp_min(0.0))
+        # Best and second-best kept neighbour of every slot, as two max passes (much faster
+        # than topk(2) on long rows). With ties, best - second is 0 whichever index wins.
+        masked = sim.masked_fill(~kept[:, None, :], -1.0)
+        best, arg = masked.max(dim=-1)
+        second = masked.scatter_(-1, arg[..., None], -1.0).amax(dim=-1).clamp_min(0.0)
+        del masked
+        loss = torch.zeros_like(w).scatter_add_(1, arg, w * (best - second).clamp_min(0.0))
         loss = (mix * loss + (1.0 - mix) * w).masked_fill(~(kept & cand), float("inf"))
         k = min(step, n_remove - removed)
         kept.scatter_(1, loss.topk(k, dim=1, largest=False).indices, False)
@@ -247,19 +256,48 @@ def window_kernel(cache):
 
 
 @torch.inference_mode()
-def evict(cache, policy, capacity, recent_frac=0.5, sink=4, eta=1.0, psi="sqrt", eps=None,
-          value_aware=False, mix=0.5, sim_power=1.0, wfl_mode="select", prune_step=8, lam=0.1,
-          chunk=16, compact=False, generator=None):
+def evict(cache, policy, capacity, compact=False, **kw):
     """Evict down to `capacity` live slots per (layer, kv_head). Returns a stats dict, or None
     if nothing needed evicting. With compact=True the evicted slots are physically removed
-    (see KVCache.compact); otherwise they are only masked.
+    (see KVCache.compact); otherwise they are only masked. Selection options: select_keep."""
+    new_keep, stats = select_keep(cache, policy, capacity, **kw)
+    if new_keep is None:
+        return None
+    cache.keep[..., :cache.length] = new_keep
+    cache.has_evicted = True
+    if compact:
+        t0 = time.perf_counter()
+        cache.compact()  # physically drop the evicted slots
+        if cache.keep.device.type == "cuda":
+            torch.cuda.synchronize()
+        stats["compact_s"] = time.perf_counter() - t0
+    return stats
+
+
+@torch.inference_mode()
+def select_keep(cache, policy, capacity, recent_frac=0.5, sink=4, eta=1.0, psi="sqrt", eps=None,
+                value_aware=False, mix=0.5, sim_power=1.0, wfl_mode="select", prune_step=8, lam=0.1,
+                chunk=16, generator=None, pool=None, prune_rounds=None, rkv_chunk=None, sim_bytes=None):
+    """The keep bits ([layers, batch, kv_heads, length]) that evicting down to `capacity` live
+    slots per (layer, kv_head) would leave, and stats, without changing the cache. Returns
+    (None, None) if nothing needs evicting.
 
     Stats: selection time, and (when the cache has a window) the fraction of each recent
     query's attention mass that survives, as mean / std / min across heads.
+
+    For compressing a long prompt in one call (thousands of slots to drop):
+      pool         wfl only: candidates are limited to the pool*m highest-H2O-score ones, and the
+                   facility-location ground set to those plus the protected slots, so the
+                   similarity matrix is that size instead of [n, n]. The rest are evicted.
+      prune_rounds wfl prune only: at most this many removal rounds (see wfl_prune).
+      sim_bytes    wfl only: pick `chunk` so the similarity matrices handled at once take about
+                   this much memory.
+      rkv_chunk    rkv only: heads scored at a time (default: a whole layer). Same result, less
+                   memory: the per-head scores are averaged over the layer either way.
     """
     n = cache.length
     if policy == "full" or n <= capacity:
-        return None
+        return None, None
     if policy in NEEDS_WINDOW and (cache.window is None or cache.win_fill == 0):
         raise ValueError(f"policy {policy!r} needs a cache created with window > 0 and track=True")
     device = cache.keep.device
@@ -302,28 +340,44 @@ def evict(cache, policy, capacity, recent_frac=0.5, sink=4, eta=1.0, psi="sqrt",
         if int(keep.sum(1).max()) != live:
             raise ValueError(f"{policy} expects the same number of live slots in every head")
         idx = keep.float().topk(live, dim=1).indices.sort(dim=1).values  # [P, live] slot ids
+        if policy == "wfl" and pool:
+            n_prot = int(protected.sum(1).max())
+            size_pool = min(live, n_prot + min(int(pool * m), live - n_prot))
+            rank = cache.score[..., :n].reshape(P, n).masked_fill(~cand, float("-inf"))
+            rank = rank.masked_fill(protected, float("inf"))
+            idx = rank.topk(size_pool, dim=1).indices.sort(dim=1).values
+        if policy == "wfl" and sim_bytes:
+            chunk = max(1, int(sim_bytes / (12 * idx.shape[1] ** 2)))
         dim = cache.k.shape[-1]
         all_k = cache.k[..., :n, :].reshape(P, n, dim)
         all_v = cache.v[..., :n, :].reshape(P, n, dim)
         all_w = cache.score[..., :n].reshape(P, n)
         picked = torch.zeros_like(idx, dtype=torch.bool)
+        groups = kernel.shape[1] // cache.win_fill if policy == "rkv" else None
         size = n_kv if policy == "rkv" else chunk  # P is ordered layer, batch, head
         for a in range(0, P, size):
             sl = slice(a, min(a + size, P))
-            take = idx[sl, :, None].expand(-1, -1, dim)
-            keys = all_k[sl].gather(1, take).float()
-            c_cand, c_held = cand[sl].gather(1, idx[sl]), protected[sl].gather(1, idx[sl])
+            c_cand = cand[sl].gather(1, idx[sl])
             if policy == "rkv":
-                z = rkv_scores(kernel[sl].gather(2, idx[sl, None, :].expand(-1, kernel.shape[1], -1)),
-                               keys, kernel.shape[1] // cache.win_fill, lam)
+                step_h = rkv_chunk or (sl.stop - sl.start)
+                z = []
+                for h in range(sl.start, sl.stop, step_h):
+                    ids = idx[h:h + step_h]
+                    win = kernel[h:h + step_h].gather(2, ids[:, None, :].expand(-1, kernel.shape[1], -1))
+                    keys = all_k[h:h + step_h].gather(1, ids[:, :, None].expand(-1, -1, dim)).float()
+                    z.append(rkv_scores(win, keys, groups, lam))
+                z = torch.cat(z)
                 picked[sl] = top_m(z.mean(0, keepdim=True).expand_as(z), c_cand, m)
                 continue
+            take = idx[sl, :, None].expand(-1, -1, dim)
+            keys = all_k[sl].gather(1, take).float()
             values = all_v[sl].gather(1, take).float()
+            c_held = protected[sl].gather(1, idx[sl])
             w = all_w[sl].gather(1, idx[sl])
             w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-9)
             sim = slot_similarity(keys, values, sim_power)
             if wfl_mode == "prune":
-                picked[sl] = wfl_prune(sim, w, c_cand, c_held, m, mix=mix, step=prune_step)
+                picked[sl] = wfl_prune(sim, w, c_cand, c_held, m, mix=mix, step=prune_step, rounds=prune_rounds)
             else:
                 picked[sl] = wfl_select(sim, w, c_cand, c_held, m, mix=mix, eps=eps, generator=generator)
         selected = torch.zeros_like(keep).scatter_(1, idx, picked)
@@ -334,8 +388,6 @@ def evict(cache, policy, capacity, recent_frac=0.5, sink=4, eta=1.0, psi="sqrt",
         raise ValueError(f"unknown policy {policy!r}")
 
     new_keep = protected | selected
-    cache.keep[..., :n] = new_keep.view(n_layers, batch, n_kv, n)
-    cache.has_evicted = True
 
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -346,9 +398,4 @@ def evict(cache, policy, capacity, recent_frac=0.5, sink=4, eta=1.0, psi="sqrt",
         retained = (after / before.clamp_min(1e-9)).mean(1)  # [P] one number per head
         stats.update(retained_mean=retained.mean().item(), retained_std=retained.std().item(),
                      retained_min=retained.min().item())
-    if compact:
-        cache.compact()  # physically drop the evicted slots
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        stats["compact_s"] = time.perf_counter() - t0 - stats["select_s"]
-    return stats
+    return new_keep.view(n_layers, batch, n_kv, n), stats

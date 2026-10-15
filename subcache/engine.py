@@ -11,6 +11,7 @@ physically smaller and later steps read less; this is the mode for speed and mem
 Every head keeps the same number of slots, so the packed cache stays a regular tensor.
 """
 
+import copy
 import random
 
 import torch
@@ -95,6 +96,16 @@ class KVCache:
                         chosen[slot] = row
             slots, rows = list(chosen.keys()), list(chosen.values())
         return rows, slots
+
+    def row(self, b):
+        """A shallow copy that reads and writes batch row b of this cache (as batch size 1).
+        Writes to its tensors land in this cache; counters such as has_evicted do not."""
+        view = copy.copy(self)
+        row = slice(b, b + 1)
+        view.k, view.v, view.keep, view.score = self.k[:, row], self.v[:, row], self.keep[:, row], self.score[:, row]
+        if self.window is not None:
+            view.window = self.window[:, row]
+        return view
 
     @property
     def allocated_bytes(self):
@@ -211,23 +222,24 @@ class Engine:
             cache.k[li, :, :, start:end] = k
             cache.v[li, :, :, start:end] = v
             # Grouped-query attention without copying K/V once per query head: the query heads
-            # that share a kv head get their own axis and broadcast against it.
-            keys = cache.k[li, :, :, :end].unsqueeze(2)  # [batch, kv, 1, end, head_dim]
-            values = cache.v[li, :, :, :end].unsqueeze(2)
-            qg = q.reshape(batch, self.n_kv, self.groups, n, self.head_dim)
+            # that share a kv head are stacked along the query axis (rows ordered group, then
+            # position), so each kv head's keys are read in place by one batched matmul.
+            keys = cache.k[li, :, :, :end]  # [batch, kv, end, head_dim]
+            values = cache.v[li, :, :, :end]
+            qg = q.reshape(batch, self.n_kv, self.groups * n, self.head_dim)
 
-            scores = torch.matmul(qg, keys.transpose(-1, -2)) * self.scale  # [batch, kv, groups, n, end]
+            scores = torch.matmul(qg, keys.transpose(-1, -2)) * self.scale  # [batch, kv, groups*n, end]
             if causal is not None:
-                scores = scores + causal
+                scores.view(batch, self.n_kv, self.groups, n, end).add_(causal)
             if cache.has_evicted:
                 evicted = ~cache.keep[li, :, :, :end]  # [batch, kv, end]
-                scores = scores.masked_fill(evicted[:, :, None, None, :], float("-inf"))
+                scores.masked_fill_(evicted[:, :, None, :], float("-inf"))
             weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
 
             if track:
                 # Attention mass each slot received, summed over the new queries and over the
                 # query heads that share a kv head.
-                cache.score[li, :, :, :end] += weights.float().sum(dim=(2, 3))
+                cache.score[li, :, :, :end] += weights.sum(dim=2, dtype=torch.float32)
                 if win_rows is not None:
                     rows = weights.reshape(batch, self.n_heads, n, end)[:, :, win_rows, :]
                     cache.window[li][:, :, win_slots, :end] = rows

@@ -98,13 +98,81 @@ tokens against each other in every attention head, and at a 12.5% budget that to
 decode time. Throughput dropped to 78 tok/s, which is worse than not evicting at all (190). A
 1–2% perplexity gain doesn't pay for that.
 
+## Task benchmarks
+
+Perplexity only goes so far, so I also checked whether the policies change actual answers. These
+ran on the RTX A6000 in bf16 with bigger models, and WFL is the weight-1.0 version. Every task
+is a small subset, listed below, so treat these as a first look rather than a leaderboard entry.
+
+For LongBench and the RULER-style tasks the model reads the whole prompt, the cache is cut down to
+the budget once, and then it answers with nothing else evicted. Budgets are a share of the prompt.
+Scores are each task's own metric out of 100.
+
+**RULER-style retrieval** (Llama-3.1-8B-Instruct, 8,192-token prompts, 5 tasks × 10 examples,
+full cache 92.8):
+
+| | 50% | 25% | 12.5% | 6.25% |
+|---|---|---|---|---|
+| Window | 51.6 | 31.7 | 18.7 | 8.7 |
+| H2O | 59.7 | 26.4 | 11.7 | 4.9 |
+| R-KV-style | **90.8** | **93.6** | **91.6** | **91.1** |
+| WFL | 59.3 | 38.7 | 14.9 | 4.1 |
+
+**LongBench** (Llama-3.1-8B-Instruct, prompts cut to 16k tokens; qasper, multifieldqa_en,
+hotpotqa and lcc with 20 examples each, gov_report with 10; average over the 5 tasks, full cache
+51.8):
+
+| | 50% | 25% | 12.5% | 6.25% |
+|---|---|---|---|---|
+| Window | 43.2 | 40.1 | 37.0 | 33.4 |
+| H2O | 51.0 | 46.9 | 44.8 | 41.0 |
+| R-KV-style | **51.8** | **50.2** | **49.1** | **44.4** |
+| WFL | 51.2 | 48.0 | 46.4 | 41.4 |
+
+**MATH-500** (DeepSeek-R1-Distill-Qwen-1.5B, 20 problems from levels 1 and 2, one sample each,
+capped at 4,096 generated tokens). Here the cache is cut back every 64 generated tokens, and the
+budget is a number of cache slots. Accuracy in percent, full cache 55:
+
+| | 2048 | 1024 | 512 | 256 |
+|---|---|---|---|---|
+| Window | 60 | 60 | 25 | 15 |
+| H2O | 55 | 60 | 65 | 45 |
+| R-KV-style | **70** | 45 | 45 | 40 |
+| WFL | 60 | **65** | **70** | **50** |
+
+What I take from these:
+
+- **Retrieval is about which attention you count.** The R-KV-style baseline scores tokens by how
+  much the last 32 tokens of the prompt (the question) attend to them, so it keeps the needle.
+  H2O and WFL use attention summed over the whole prompt, and they lose it at every budget. WFL is
+  built on H2O's scores, so redundancy-awareness can't fix that.
+- **On LongBench, WFL lands between H2O and R-KV-style.** On every single task it was
+  statistically tied with H2O. R-KV-style was clearly better on two of the QA tasks (qasper and
+  multifieldqa_en) at some budgets, but clearly worse than H2O on summarization (gov_report) at
+  25% and below, while WFL stayed level with H2O there. That fits the idea: a summary needs
+  coverage of the whole document.
+- **MATH is too noisy to rank.** Half of the full-cache runs hit the 4,096-token cap before
+  answering, so the scores mostly say whether the model finished thinking in time. WFL was 5
+  points above H2O at every budget, but every interval was about ±20 points. The only clear
+  results are that Window falls apart at 512 and 256 slots, and that R-KV-style was worse than H2O
+  at 512.
+
+The obvious next step is WFL with question-window weights instead of H2O's, which might keep the
+retrieval wins and the summary coverage at once. I haven't run that.
+
 ## Limitations
 
 Because my machine was CPU bound, the true effect on speed is hard to know. Decode speed was
 identical at every cache size due to CPU limitations.
 
-These are also small models, and I measured perplexity, not whether an agent actually finishes
-its task.
+The perplexity results use small models, and perplexity isn't the same as an agent actually
+finishing its task. The task benchmarks use bigger models but small subsets: 10 to 20 examples
+per task, LongBench prompts cut to 16k tokens, only the easiest MATH levels, a 4,096-token
+generation cap and one sample per problem. Many of their intervals are ±10 points or wider. The
+RULER-style tasks are my own reimplementation with a WikiText haystack. To keep selection fast on
+long prompts, WFL only chose among the older tokens that H2O ranks highest, twice as many as it
+had slots to fill. So none of these numbers should be compared with published tables. I also
+didn't report timings for them, since the GPU was shared with other jobs.
 
 ## Running it
 
@@ -115,11 +183,18 @@ python scripts/gate.py                              # needs a GPU
 python scripts/run_eviction.py --n-seqs 8           # small sweep on WikiText
 python scripts/analyze.py results/batch/core8k_late.jsonl --masked
 python scripts/make_figures.py
+
+# task benchmarks (A6000-sized GPU; also needs rouge, fuzzywuzzy, math-verify)
+bash scripts/bench_all.sh long                      # RULER-style tasks, then LongBench
+bash scripts/bench_all.sh math                      # MATH-500
+python scripts/analyze_bench.py results/bench/longbench_llama31.jsonl
 ```
 
 The engine is in `subcache/engine.py`, the eviction policies in `subcache/policies.py`, and the
-evaluations in `subcache/evals.py`. `scripts/` has the correctness gate, the sweeps, the speed
-benchmark and the figure code. `results/` has the raw numbers behind everything above.
+evaluations in `subcache/evals.py`. The task benchmarks are in `subcache/benchmarks.py`, with
+the prompt-compression and decode-time eviction loops in `subcache/longctx.py`. `scripts/` has
+the correctness gate, the sweeps, the speed benchmark, the task benchmarks and the figure code.
+`results/` has the raw numbers behind everything above.
 
 ## Credit
 
@@ -127,6 +202,9 @@ benchmark and the figure code. `results/` has the raw numbers behind everything 
 - PRISM: Kothawade et al., AAAI 2022
 - R-KV: Cai et al., NeurIPS 2025
 - Agent trajectories: `nebius/SWE-rebench-openhands-trajectories` (CC-BY-4.0)
+- LongBench: Bai et al., ACL 2024
+- RULER: Hsieh et al., COLM 2024
+- MATH: Hendrycks et al., NeurIPS 2021 (the MATH-500 subset from Lightman et al., 2023)
 
 This was written with Claude, but I am currently working on hand making my own inference engine
 from scratch.
