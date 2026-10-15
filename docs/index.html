@@ -291,6 +291,7 @@
   <h2>Run it yourself</h2>
 <pre><code>pip install torch transformers datasets
 python tests/test_policies.py
+python tests/test_longctx.py                       # benchmark code, tiny random model on the CPU
 python scripts/gate.py                              # needs a GPU
 python scripts/run_eviction.py --n-seqs 8           # small sweep on WikiText
 python scripts/analyze.py results/batch/core8k_late.jsonl --masked

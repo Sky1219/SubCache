@@ -3,7 +3,9 @@
 For every task (and context length, for RULER) prints a policy x budget table of mean scores,
 then each policy's paired difference from H2O at the same budget with a 95% bootstrap interval
 over examples. MATH-500 scores are accuracy in percent; LongBench and RULER use their own
-metrics (x100). A final block averages the per-task means, as LongBench's tables do.
+metrics (x100). A final block averages the per-task means, as LongBench's tables do. Records
+made with different settings (their "config" hash) are summarized separately. Without an H2O
+run at a budget, the table shows means only.
 """
 
 import json
@@ -20,8 +22,20 @@ def load(paths):
     rows = []
     for p in paths:
         with open(p) as f:
-            rows += [json.loads(line) for line in f]
+            lines = [line for line in f if line.strip()]
+        for i, line in enumerate(lines):
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                if i < len(lines) - 1:
+                    raise
+                print(f"{p}: skipping an incomplete last line")  # a run killed mid-write
     return rows
+
+
+def rank(policy):
+    """Sort key: the known policies in ORDER, then any others by name."""
+    return (ORDER.index(policy), "") if policy in ORDER else (len(ORDER), policy)
 
 
 def score_of(r):
@@ -43,16 +57,20 @@ def table(title, examples):
     """examples: list of {(policy, budget): score} dicts, one per example."""
     keys = sorted({k for ex in examples for k in ex})
     budgets = sorted({b for p, b in keys if p != "full"}, reverse=True)
-    policies = [p for p in ORDER if p != "full" and any(k[0] == p for k in keys)]
+    policies = sorted({p for p, _ in keys if p != "full"}, key=rank)
     full = [ex[("full", 1.0)] for ex in examples if ("full", 1.0) in ex]
-    print(f"\n{title}  ({len(examples)} examples; full cache {np.mean(full):.1f})")
+    print(f"\n{title}  ({len(examples)} examples" + (f"; full cache {np.mean(full):.1f})" if full else ")"))
     print("  " + f"{'policy':12}" + "".join(f"{budget_label(b):>30}" for b in budgets))
     for p in policies:
         line = f"  {NAME.get(p, p):12}"
         for b in budgets:
-            have = [ex for ex in examples if (p, b) in ex and ("h2o", b) in ex]
-            if not have:
+            mine = [ex for ex in examples if (p, b) in ex]
+            have = [ex for ex in mine if ("h2o", b) in ex]
+            if not mine:
                 line += f"{'':>30}"
+                continue
+            if not have:  # no H2O run to pair with: mean only
+                line += f"{np.mean([ex[(p, b)] for ex in mine]):>9.1f}{'':21}"
                 continue
             mean = np.mean([ex[(p, b)] for ex in have])
             if p == "h2o":
@@ -66,6 +84,22 @@ def table(title, examples):
 
 def main(paths):
     rows = load(paths)
+    configs = defaultdict(list)
+    for r in rows:
+        configs[r.get("config")].append(r)
+    varying = []
+    if len(configs) > 1:
+        keys = {k for r in rows for k in (r.get("settings") or {})}
+        varying = sorted(k for k in keys if len({json.dumps((r.get("settings") or {}).get(k)) for r in rows}) > 1)
+        print(f"{len(configs)} different settings in these files" + (f"; they differ in {', '.join(varying)}" if varying else ""))
+    for config, rs in configs.items():
+        if len(configs) > 1:
+            st = rs[0].get("settings") or {}
+            print(f"\n=== config {config}: " + ", ".join(f"{k}={json.dumps(st.get(k))}" for k in varying))
+        summarize(rs)
+
+
+def summarize(rows):
     groups = defaultdict(list)
     for r in rows:
         ex = {(x["policy"], x["budget"]): score_of(x) for x in r["results"]}
@@ -78,7 +112,7 @@ def main(paths):
                 for x in r["results"]:
                     by[(x["policy"], x["budget"])].append((x["gen_len"], x["truncated"]))
             print("  mean generated tokens / share hitting the cap:")
-            for (p, b), v in sorted(by.items(), key=lambda kv: (ORDER.index(kv[0][0]), -kv[0][1])):
+            for (p, b), v in sorted(by.items(), key=lambda kv: (rank(kv[0][0]), -kv[0][1])):
                 print(f"    {NAME.get(p, p):12} {budget_label(b):>6}  {np.mean([g for g, _ in v]):7.0f}  "
                       f"{100 * np.mean([t for _, t in v]):5.1f}%")
     # Average over tasks, as LongBench reports it: the mean of the per-task means.
@@ -95,10 +129,11 @@ def main(paths):
         print(f"\nAverage over {len(tasks)} tasks" + (f" @ {length} tokens" if length else "") + ":")
         budgets = sorted({b for p, b in keys if p != "full"}, reverse=True)
         print("  " + f"{'policy':12}" + "".join(f"{budget_label(b):>9}" for b in budgets))
-        print(f"  {'Full cache':12}" + f"{np.mean([v[('full', 1.0)] for v in tasks.values()]):>9.1f}")
-        for p in ORDER[1:]:
+        if all(("full", 1.0) in v for v in tasks.values()):
+            print(f"  {'Full cache':12}" + f"{np.mean([v[('full', 1.0)] for v in tasks.values()]):>9.1f}")
+        for p in sorted({p for p, _ in keys if p != "full"}, key=rank):
             if any((p, b) in keys for b in budgets):
-                print(f"  {NAME[p]:12}" + "".join(
+                print(f"  {NAME.get(p, p):12}" + "".join(
                     f"{np.mean([v[(p, b)] for v in tasks.values()]):>9.1f}" if (p, b) in keys else f"{'':>9}"
                     for b in budgets))
 

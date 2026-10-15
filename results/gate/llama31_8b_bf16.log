@@ -1,0 +1,16 @@
+model=meta-llama/Llama-3.1-8B-Instruct dtype=bfloat16 device=NVIDIA RTX A6000 torch=2.11.0+cu128 transformers=5.18.0
+prefill logits max|diff| vs HF: 0.0000 (argmax agree at 100% of positions)
+  'The capital of France is'                   T=    6    88.7 ms/tok  near-tie at step 10 (top-2 gap 0.1250)
+  'World War Two ended in'                     T=    6    60.1 ms/tok  MATCH
+  'The best selling fruit in the worlds is'    T=    9    32.5 ms/tok  MATCH
+  'Bananas go well with'                       T=    6    56.0 ms/tok  near-tie at step 61 (top-2 gap 0.0000)
+  ' I love'                                    T=    3    74.3 ms/tok  near-tie at step 24 (top-2 gap 0.1250)
+  'def fibonacci(n):\n    '                    T=    6    78.2 ms/tok  near-tie at step 64 (top-2 gap 0.1250)
+  filler L=128                                 T=  128    77.9 ms/tok  MATCH
+  filler L=512                                 T=  512    71.7 ms/tok  MATCH
+  filler L=1900                                T= 1900    37.5 ms/tok  MATCH
+  filler L=3500                                T= 3500   108.1 ms/tok  MATCH
+  batch of 4, L=64: MATCH; MATCH; MATCH; MATCH
+  batch of 4, L=512: MATCH; MATCH; MATCH; MATCH
+14 exact, 4 near-tie, 0 real mismatch out of 18
+EXIT=0
