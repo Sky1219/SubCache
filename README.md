@@ -210,5 +210,5 @@ the correctness gate, the sweeps, the speed benchmark, the task benchmarks and t
 - RULER: Hsieh et al., COLM 2024
 - MATH: Hendrycks et al., NeurIPS 2021 (the MATH-500 subset from Lightman et al., 2023)
 
-This was written with Claude, but I am currently working on hand making my own inference engine
-from scratch.
+I'm currently building my own inference engine from scratch:
+[hipinfer](https://github.com/Sky1219/hipinfer).
