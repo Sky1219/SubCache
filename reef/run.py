@@ -20,6 +20,7 @@ import torch
 from reef.data import load_stories, recall_targets
 from reef.engine import MODEL, NeoEngine, load_model
 from reef.policies import Streaming
+from reef.kvquant import KVQuant, calibrate_outliers
 from reef.quant import quantize_weights_int8
 
 SINK = 4
@@ -33,8 +34,13 @@ def grid(name, budgets):
         for protect in protects:
             for b in budgets:
                 for p in params:
-                    recent = int(round(RECENT_FRAC * b)) if protect == "sink+recent" else 0
-                    out.append(dict(budget=b, sink=SINK, recent=recent, param=p, protect=protect, policy=label(p)))
+                    sink, recent = SINK, (int(round(RECENT_FRAC * b)) if protect == "sink+recent" else 0)
+                    if protect == "gold":
+                        # The TIU team's gold config (token-importance-unit h2o_analysis.py): no sinks,
+                        # a recent window of L = round(0.5 C) tokens counting the current one, the
+                        # rest heavy hitters, with C = budget + 1 tokens seen by each query.
+                        sink, recent = 0, max(1, round(RECENT_FRAC * (b + 1))) - 1
+                    out.append(dict(budget=b, sink=sink, recent=recent, param=p, protect=protect, policy=label(p)))
         return out
 
     both = ("sink+recent", "sink")
@@ -57,6 +63,24 @@ def grid(name, budgets):
             ("window", "head", rows(budgets, one, [None], lambda p: "window")),
             ("h2o", "head", rows(budgets, one, [None], lambda p: "h2o")),
             ("rw", "head", rows(budgets, one, [16], lambda p: f"rw{p}")),
+        ]
+    if name == "gold":  # the TIU team's gold protection config, fp32
+        gold = ("gold",)
+        return [
+            ("window", "head", rows(budgets, gold, [None], lambda p: "window")),
+            ("h2o", "head", rows(budgets, gold, [None], lambda p: "h2o")),
+            ("tiu", "head", rows(budgets, gold, [255, 32], tiu_label)),
+            ("rw", "head", rows(budgets, gold, [16], lambda p: f"rw{p}")),
+            ("ema", "head", rows(budgets, gold, [0.9], lambda p: f"ema{p}")),
+        ]
+    if name == "kvq":  # main policies under the KV Cache Engine codecs (run with --kv-quant)
+        two = ("sink+recent", "gold")
+        return [
+            ("window", "head", rows(budgets, one, [None], lambda p: "window")),
+            ("h2o", "head", rows(budgets, two, [None], lambda p: "h2o")),
+            ("tiu", "head", rows(budgets, two, [255], tiu_label)),
+            ("rw", "head", rows(budgets, two, [16], lambda p: f"rw{p}")),
+            ("ema", "head", rows(budgets, two, [0.9], lambda p: f"ema{p}")),
         ]
     if name == "int8":
         return [
@@ -208,10 +232,17 @@ def main():
     ap.add_argument("--gap", type=int, default=32)
     ap.add_argument("--threads", type=int, default=16, help="CPU threads (ignored by CUDA kernels)")
     ap.add_argument("--device", default="cpu", help="cpu or cuda; the gate must pass on the same device")
+    ap.add_argument("--kv-quant", default="none", choices=["none", "cq4p_wht3"],
+                    help="KV Cache Engine codecs: ChannelQuant CQ-4+ keys, CQ-3-rot (WHT INT3) values")
+    ap.add_argument("--key-group", type=int, default=128, help="key group size G (their default 128)")
+    ap.add_argument("--outlier-k", type=int, default=2, help="FP16 outlier key channels per (layer, head)")
+    ap.add_argument("--calib-n", type=int, default=64, help="held-out stories for the outlier mask")
     ap.add_argument("--evict-layers", default="all", choices=["all", "global"],
                     help="layers the budget applies to; 'global' leaves local layers at their 256-token window")
     ap.add_argument("--part", default="0/1", help="k/n: run the k-th of n balanced shares of the grid "
                     "(part 0 also writes the full-cache lines); parts can run as parallel processes")
+    ap.add_argument("--no-full", action="store_true",
+                    help="skip the full-cache lines (when another file of the same setting has them)")
     ap.add_argument("--limit-batches", type=int, default=0, help="debug: stop after this many batches")
     args = ap.parse_args()
 
@@ -225,9 +256,21 @@ def main():
         quantize_weights_int8(model)
     engine = NeoEngine(model)
     stories = load_stories(tok, n=args.n, seed=args.seed)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    kv_tag = "none"
+    if args.kv_quant != "none":
+        # Static outlier mask calibrated offline, as the KVCE's ROM is: on stories disjoint from
+        # the evaluation set, with the unquantized engine.
+        calib = load_stories(tok, n=args.calib_n, seed=args.seed + 1, exclude={s["story"] for s in stories})
+        outlier = calibrate_outliers(engine, calib, k=args.outlier_k)
+        engine.kvq = KVQuant(outlier, group=args.key_group)
+        kv_tag = f"{args.kv_quant}_G{args.key_group}"
+        with open(os.path.splitext(args.out)[0] + ".outliers.json", "w") as f:
+            json.dump({"calibration_stories": [s["story"] for s in calib],
+                       "outlier_channels": outlier.nonzero().tolist()}, f)
     stories.sort(key=lambda s: len(s["ids"]))  # length-bucketed batches waste little on padding
     groups = split(grid(args.grid, budgets), *map(int, args.part.split("/")))
-    with_full = args.part.split("/")[0] == "0"
+    with_full = args.part.split("/")[0] == "0" and not args.no_full
 
     done = set()
     if os.path.exists(args.out):
@@ -237,7 +280,7 @@ def main():
                 done.add((d["family"], d["granularity"], d["batch"]))
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     meta = dict(model=MODEL, quant=args.quant, grid=args.grid, seed=args.seed, gap=args.gap,
-                evict_layers=args.evict_layers)
+                evict_layers=args.evict_layers, kv=kv_tag)
     evict = None if args.evict_layers == "all" else [not local for local in engine.local]
 
     batches = [stories[i:i + args.batch] for i in range(0, len(stories), args.batch)]

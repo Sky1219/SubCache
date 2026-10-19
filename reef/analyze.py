@@ -10,6 +10,7 @@ config, so differences between configs (vs full cache, vs H2O) are paired.
 """
 
 import glob
+import re
 import json
 import os
 
@@ -43,11 +44,13 @@ METRICS = {
 }
 
 
-def load(pattern):
+def load(pattern, device=None):
+    """JSONL rows matching `pattern` in RES (or RES/gpu with device='gpu': tagged so they pair only
+    with other GPU rows)."""
     rows = []
-    for path in sorted(glob.glob(os.path.join(RES, pattern))):
+    for path in sorted(glob.glob(os.path.join(RES, "gpu" if device == "gpu" else "", pattern))):
         with open(path) as f:
-            rows += [json.loads(line) for line in f]
+            rows += [dict(json.loads(line), **({"device": device} if device else {})) for line in f]
     return rows
 
 
@@ -58,6 +61,10 @@ def table(rows):
     out = {}
     for r in rows:
         setting = r["quant"] if r.get("evict_layers", "all") == "all" else r["quant"] + ", global layers only"
+        if r.get("kv", "none") != "none":
+            setting += ", KV " + r["kv"]
+        if r.get("device") == "gpu":
+            setting += " (GPU)"
         key = (setting, r["policy"], r["granularity"], r["protect"], r["budget"])
         d = out.setdefault(key, {})
         for k, v in r.items():
@@ -148,12 +155,17 @@ def fmt(x, c, pct=False, digits=3):
     return f"{x:.{digits}f} [{c[0]:.{digits}f}, {c[1]:.{digits}f}]"
 
 
-def markdown(summary, quant="fp32"):
+def markdown(summary, quant="fp32", only=None):
     md = []
     budgets = sorted({e["budget"] for e in summary})
     for gran, protect, title in [("head", "sink+recent", "per-head, 4 sinks + recent window (half the budget)"),
+                                 ("head", "gold", "per-head, TIU team's gold config (no sinks, recent C/2)"),
                                  ("head", "sink", "per-head, 4 sinks, no recent window"),
                                  ("layer", "sink+recent", "one keep set per layer, 4 sinks + recent window")]:
+        if not any((e["quant"], e["granularity"], e["protect"]) == (quant, gran, protect) for e in summary):
+            continue
+        if only and protect not in only:
+            continue
         md += [f"\n### {quant}: {title}\n",
                "| budget | policy | recall acc % | Δ vs full (pts) | Δ vs H2O (pts) | ppl / full | top-1 agree % | KL |",
                "|---|---|---|---|---|---|---|---|"]
@@ -195,8 +207,9 @@ def figure(summary, quant, gran, protect, policies, path, title):
         for i, p in enumerate(policies):
             es = [next((e for e in summary if (e["quant"], e["policy"], e["granularity"], e["protect"], e["budget"]) ==
                         (quant, p, gran, protect, b)), None) for b in budgets]
-            if p == "window" and es[0] is None:  # window ignores protect / granularity: reuse its one run
-                es = [next(e for e in summary if (e["quant"], e["policy"], e["budget"]) == (quant, p, b)) for b in budgets]
+            if p == "window" and es[0] is None:  # window ignores recent / granularity: reuse its run with sinks
+                es = [next(e for e in summary if (e["quant"], e["policy"], e["protect"], e["budget"]) ==
+                           (quant, p, "sink+recent", b)) for b in budgets]
             if any(e is None for e in es):
                 continue
             off = (i - (len(policies) - 1) / 2) * 0.035  # small horizontal dodge so CIs don't overlap
@@ -239,7 +252,10 @@ def figure(summary, quant, gran, protect, policies, path, title):
 
 def main():
     os.makedirs(FIG, exist_ok=True)
-    rows = load("main.part*.jsonl") + load("int8.jsonl") + load("global.jsonl") + load("sim.jsonl")
+    rows = (load("main.part*.jsonl") + load("int8.jsonl") + load("global.jsonl") + load("sim.jsonl")
+            + load("gold*.jsonl") + load("kvq_G*.jsonl")  # from reproduce.py on CPU, if present
+            + load("kvq_G*.jsonl", "gpu") + load("main.part*.jsonl", "gpu") + load("gold.jsonl", "gpu")
+            + load("sim.jsonl", "gpu"))
     tab, stories = table(rows)
     Wb = boot_weights(len(stories))
     worst = check_reference(tab)
@@ -249,7 +265,9 @@ def main():
           f"95% percentile CIs in brackets. Cross-check of reference sums between code paths: "
           f"max |diff| {worst:.2e} nats.\n"]
     for q in quants:
-        md.append(markdown(summary, q))
+        # The GPU copy of the main sweep exists to pair with the GPU-only gold run (and for
+        # device_check.md); its other tables would repeat the CPU ones.
+        md.append(markdown(summary, q, only=("gold", "sink+recent") if q == "fp32 (GPU)" else None))
     tiu = [e for e in summary if "tiu_saturated_frac" in e]
     if tiu:
         md += ["\n### TIU eviction decisions\n", "| quant | policy | granularity | protect | budget | all candidates saturated at 255 | min score tied |",
@@ -272,6 +290,15 @@ def main():
            os.path.join(FIG, "variants_protected.png"), "Parameter variants (per-head, sinks + recent window)")
     figure(summary, "fp32", "head", "sink", ["h2o", "tiu", "tiu/7", "rw8", "rw16", "rw32", "ema0.9", "ema0.99"],
            os.path.join(FIG, "variants_no_recent.png"), "Parameter variants (per-head, sinks only, no recent window)")
+    figure(summary, "fp32 (GPU)", "head", "gold", CORE, os.path.join(FIG, "gold_config.png"),
+           "Per-head eviction, TIU team's gold config: no sinks, recent window C/2")
+    for q in quants:
+        if ", KV " in q:
+            G = re.search(r"_G(\d+)", q).group(1)
+            figure(summary, q, "head", "sink+recent", CORE, os.path.join(FIG, f"kvq_G{G}_protected.png"),
+                   f"KV Cache Engine codecs (CQ-4+ keys, G={G}; CQ-3-rot values): sinks + recent window")
+            figure(summary, q, "head", "gold", CORE[1:], os.path.join(FIG, f"kvq_G{G}_gold.png"),
+                   f"KV Cache Engine codecs (G={G}), TIU team's gold config")
     if "int8" in quants:
         # The int8 grid ran EMA alpha = 0.99 (see run.grid), so that is the EMA line here.
         figure(summary, "int8", "head", "sink+recent", ["window", "h2o", "tiu", "rw16", "ema0.99"],

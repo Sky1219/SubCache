@@ -1,0 +1,20 @@
+device: cuda
+test_wht3_bit_exact ok
+test_key_group_bit_exact ok
+Loading weights:   0%|          | 0/108 [00:00<?, ?it/s]Loading weights: 100%|██████████| 108/108 [00:00<00:00, 27372.34it/s]
+[transformers] [1mGPTNeoForCausalLM LOAD REPORT[0m from: roneneldan/TinyStories-28M
+Key                                                               | Status     |  | 
+------------------------------------------------------------------+------------+--+-
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.masked_bias | UNEXPECTED |  | 
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.bias        | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+  smooth codecs, G=16 h2o budget 16: max |logit diff| 6.5e-05
+  smooth codecs, G=32 tiu budget 24: max |logit diff| 4.9e-05
+  smooth codecs, G=128 h2o budget 400: max |logit diff| 3.6e-05
+test_engine_kvq_plumbing_matches_hf ok
+  real codecs, G=16 h2o budget 16: top-1 agreement 0.9128, median |logit diff| 1.88
+  real codecs, G=32 tiu budget 24: top-1 agreement 0.9426, median |logit diff| 1.64
+  real codecs, G=128 h2o budget 400: top-1 agreement 0.9617, median |logit diff| 1.04
+test_engine_kvq_real_codecs_close_to_hf ok

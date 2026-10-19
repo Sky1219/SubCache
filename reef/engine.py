@@ -79,6 +79,7 @@ class NeoEngine:
         self.local = [kind == "local" for kind in self.config.attention_layers]
         self.device = self.wte.weight.device
         self.dtype = self.wte.weight.dtype
+        self.kvq = None  # optional reef.kvquant.KVQuant: KV Cache Engine codecs on the cache
 
     def new_cache(self, rows, capacity):
         return SlotCache(self.n_layers, rows, self.n_heads, capacity, self.head_dim, self.device, self.dtype)
@@ -117,6 +118,8 @@ class NeoEngine:
             q = attn.q_proj(x).view(rows, self.n_heads, self.head_dim)
             k = attn.k_proj(x).view(rows, self.n_heads, self.head_dim)
             v = attn.v_proj(x).view(rows, self.n_heads, self.head_dim)
+            if self.kvq is not None:
+                k, v = self.kvq.on_write(k, v)
             cache.k[li][r_idx, h_idx, slot[li]] = k
             cache.v[li][r_idx, h_idx, slot[li]] = v
 
@@ -129,6 +132,9 @@ class NeoEngine:
             h = h + attn.out_proj(out.reshape(rows, -1))
             h = h + block.mlp(block.ln_2(h))
 
+        if self.kvq is not None:  # a key group completed by this token is quantized after the step
+            for li in range(self.n_layers):
+                self.kvq.close_group(cache, li, t)
         cache.t = t + 1
         return self.ln_f(h), attns, slot
 

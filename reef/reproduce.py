@@ -4,7 +4,8 @@
 
 Steps: correctness gate and policy tests (stop on failure) -> fp32 sweep (two parallel processes)
 -> int8-weight sweep -> global-layers-only sensitivity sweep -> the TIU team's non-permanent
-simulation (reef/sim.py) -> bootstrap analysis, figures and the hardware-cost table, plus the
+simulation (reef/sim.py) -> the TIU team's gold protection config -> the KV Cache Engine codecs
+(G = 128 and 32) -> bootstrap analysis, figures and the hardware-cost table, plus the
 CPU-vs-GPU check if reef/results/gpu holds a run of reef/run_gpu.sh.
 On a 16-thread laptop CPU the sweeps take roughly 3-4 hours; they resume where they stopped if
 re-run. --skip-sweeps re-does only the analysis from the JSONL already in reef/results/.
@@ -34,6 +35,7 @@ def main():
     run([py, "reef/tests/test_policies.py"])
     run([py, "reef/tests/test_gate.py"])
     run([py, "reef/tests/test_sim.py"])
+    run([py, "reef/tests/test_kvquant.py"])
 
     if not args.skip_sweeps:
         os.makedirs(os.path.join(ROOT, RESULTS), exist_ok=True)
@@ -50,7 +52,12 @@ def main():
         run([py, "-m", "reef.run", "--grid", "global", "--evict-layers", "global", "--threads", str(2 * args.threads),
              "--out", os.path.join(RESULTS, "global.jsonl")])
 
-        run([py, "-m", "reef.sim", "--out", os.path.join(RESULTS, "sim.jsonl")])
+        run([py, "-m", "reef.sim", "--out", os.path.join(RESULTS, "sim.jsonl")])  # analyze also reads gpu/sim.jsonl
+        run([py, "-m", "reef.run", "--grid", "gold", "--no-full", "--threads", str(2 * args.threads),
+             "--out", os.path.join(RESULTS, "gold.jsonl")])
+        for G in (128, 32):
+            run([py, "-m", "reef.run", "--grid", "kvq", "--kv-quant", "cq4p_wht3", "--key-group", str(G),
+                 "--threads", str(2 * args.threads), "--out", os.path.join(RESULTS, f"kvq_G{G}.jsonl")])
 
     run([py, "-m", "reef.hw_cost"])
     run([py, "-m", "reef.analyze"])

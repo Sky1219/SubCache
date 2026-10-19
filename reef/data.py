@@ -44,10 +44,10 @@ Every Some All If In On At As Just Now Soon Later Finally Suddenly Today Mom Dad
 """.split())
 
 
-def load_stories(tok, n=500, seed=0, min_len=160, max_len=512):
+def load_stories(tok, n=500, seed=0, min_len=160, max_len=512, exclude=()):
     """`n` stories drawn uniformly (random.Random(seed)) from the validation stories whose length,
-    including the leading <|endoftext|>, is in [min_len, max_len]. Returns dicts with the story's
-    index in the file and its token ids."""
+    including the leading <|endoftext|>, is in [min_len, max_len] and whose index is not in
+    `exclude`. Returns dicts with the story's index in the file and its token ids."""
     path = hf_hub_download("roneneldan/TinyStories", "TinyStories-valid.txt", repo_type="dataset")
     with open(path, encoding="utf-8") as f:
         texts = [s.strip() for s in f.read().split("<|endoftext|>")]
@@ -56,7 +56,7 @@ def load_stories(tok, n=500, seed=0, min_len=160, max_len=512):
         if not text:
             continue
         ids = [BOS] + tok(text)["input_ids"]
-        if min_len <= len(ids) <= max_len:
+        if min_len <= len(ids) <= max_len and i not in exclude:
             eligible.append({"story": i, "ids": ids})
     if len(eligible) < n:
         raise ValueError(f"only {len(eligible)} stories in [{min_len}, {max_len}] tokens")
