@@ -1,0 +1,15 @@
+device: cuda
+test_keep_mask_brute_force ok
+Loading weights:   0%|          | 0/108 [00:00<?, ?it/s]Loading weights: 100%|██████████| 108/108 [00:00<00:00, 17667.12it/s]
+[transformers] [1mGPTNeoForCausalLM LOAD REPORT[0m from: roneneldan/TinyStories-28M
+Key                                                               | Status     |  | 
+------------------------------------------------------------------+------------+--+-
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.masked_bias | UNEXPECTED |  | 
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.bias        | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+  story len 470: |patched - HF| 0.0e+00, |sim at budget > T - HF| 0.0e+00
+  budget 32, lookahead=True: max |diff| vs full 18.62
+  budget 32, lookahead=False: max |diff| vs full 19.30
+test_sim_matches_full_cache_and_changes_output ok

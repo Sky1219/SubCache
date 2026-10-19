@@ -1,0 +1,44 @@
+device: cuda
+test_full_cache_matches_hf
+Loading weights:   0%|          | 0/108 [00:00<?, ?it/s]Loading weights: 100%|██████████| 108/108 [00:00<00:00, 5055.58it/s]
+[transformers] [1mGPTNeoForCausalLM LOAD REPORT[0m from: roneneldan/TinyStories-28M
+Key                                                               | Status     |  | 
+------------------------------------------------------------------+------------+--+-
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.masked_bias | UNEXPECTED |  | 
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.bias        | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+  full cache, story len 160: max |logit diff| 2.43e-05, top-1 agreement 1.0000
+  full cache, story len 256: max |logit diff| 2.86e-05, top-1 agreement 1.0000
+  full cache, story len 470: max |logit diff| 4.43e-05, top-1 agreement 1.0000
+test_streaming_eviction_matches_hf_masks
+  window head  budget  16 recent  8: max |logit diff| 6.68e-05
+  window head  budget  24 recent  0: max |logit diff| 6.15e-05
+  h2o    head  budget  16 recent  8: max |logit diff| 5.15e-05
+  h2o    head  budget  24 recent  0: max |logit diff| 5.72e-05
+  tiu    head  budget  16 recent  8: max |logit diff| 6.65e-05
+  tiu    head  budget  24 recent  0: max |logit diff| 5.05e-05
+  tiu    layer budget  16 recent  4: max |logit diff| 7.87e-05
+  rw     head  budget  16 recent  8: max |logit diff| 5.63e-05
+  rw     head  budget  24 recent  0: max |logit diff| 6.96e-05
+  rw     head  budget  32 recent  0: max |logit diff| 8.34e-05
+  ema    layer budget  16 recent  0: max |logit diff| 5.58e-05
+  ema    layer budget  24 recent  8: max |logit diff| 8.23e-05
+  h2o    head  global-only budget  16 recent  8: max |logit diff| 4.48e-05
+test_runner_metrics_on_full_cache
+  story 0: 142 positions, 1 recall tokens, KL 0.0e+00
+  story 1: 238 positions, 9 recall tokens, KL 1.3e-06
+  story 2: 452 positions, 26 recall tokens, KL -3.4e-06
+test_int8_fake_quant
+Loading weights:   0%|          | 0/108 [00:00<?, ?it/s]Loading weights: 100%|██████████| 108/108 [00:00<00:00, 21338.02it/s]
+[transformers] [1mGPTNeoForCausalLM LOAD REPORT[0m from: roneneldan/TinyStories-28M
+Key                                                               | Status     |  | 
+------------------------------------------------------------------+------------+--+-
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.masked_bias | UNEXPECTED |  | 
+transformer.h.{0, 1, 2, 3, 4, 5, 6, 7}.attn.attention.bias        | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+  int8 vs fp32 top-1 agreement 1.000, max |logit diff| 0.66
+gate passed

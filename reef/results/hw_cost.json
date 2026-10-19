@@ -1,0 +1,201 @@
+{
+  "assumptions": {
+    "dtcm_bytes": 32768,
+    "hyperram_bytes_per_s": 90000000.0,
+    "clock_hz": 16000000.0,
+    "weight_bytes": 1,
+    "kv_bytes": {
+      "int8": 1,
+      "fp16": 2
+    },
+    "score_bits": {
+      "h2o": 8,
+      "ema": 16,
+      "rw": 8
+    },
+    "attn_weight_bits": 8,
+    "weights_streamed_every_token": true,
+    "argmin": "serial, 1 compare/cycle, N+1 cycles per scan (as in the TIU RTL)"
+  },
+  "model": {
+    "d": 512,
+    "layers": 8,
+    "heads": 16,
+    "head_dim": 32,
+    "vocab": 50257,
+    "ff": 2048,
+    "window": 256,
+    "kinds": [
+      "global",
+      "local",
+      "global",
+      "local",
+      "global",
+      "local",
+      "global",
+      "local"
+    ],
+    "ctx": 2048,
+    "per_layer_params": 3150848,
+    "block_params": 25206784,
+    "lm_head_params": 25731584,
+    "final_ln": 1024
+  },
+  "kv": {
+    "int8": {
+      "bytes_per_token_per_layer": 1024,
+      "bytes_per_token": 8192,
+      "tokens_in_dtcm_all_layers": 4,
+      "tokens_in_dtcm_one_layer": 32
+    },
+    "fp16": {
+      "bytes_per_token_per_layer": 2048,
+      "bytes_per_token": 16384,
+      "tokens_in_dtcm_all_layers": 2,
+      "tokens_in_dtcm_one_layer": 16
+    }
+  },
+  "traffic": [
+    {
+      "case": "budget 16",
+      "kv_read_bytes": 139264,
+      "kv_ms": 1.5473777777777777,
+      "weight_bytes": 50940416,
+      "weight_ms": 566.0046222222222,
+      "kv_share": 0.0027264070565829698,
+      "ms_per_token": 567.552
+    },
+    {
+      "case": "budget 32",
+      "kv_read_bytes": 270336,
+      "kv_ms": 3.0037333333333334,
+      "weight_bytes": 50940416,
+      "weight_ms": 566.0046222222222,
+      "kv_share": 0.0052788914327991125,
+      "ms_per_token": 569.0083555555556
+    },
+    {
+      "case": "budget 64",
+      "kv_read_bytes": 532480,
+      "kv_ms": 5.916444444444444,
+      "weight_bytes": 50940416,
+      "weight_ms": 566.0046222222222,
+      "kv_share": 0.010344861886146837,
+      "ms_per_token": 571.9210666666667
+    },
+    {
+      "case": "budget 128",
+      "kv_read_bytes": 1056768,
+      "kv_ms": 11.741866666666667,
+      "weight_bytes": 50940416,
+      "weight_ms": 566.0046222222222,
+      "kv_share": 0.020323562137518833,
+      "ms_per_token": 577.7464888888888
+    },
+    {
+      "case": "full cache, median story (201 tok)",
+      "kv_read_bytes": 1646592,
+      "kv_ms": 18.295466666666666,
+      "weight_bytes": 50940416,
+      "weight_ms": 566.0046222222222,
+      "kv_share": 0.03131176430497814,
+      "ms_per_token": 584.3000888888889
+    },
+    {
+      "case": "full cache at ctx 2048",
+      "kv_read_bytes": 9437184,
+      "kv_ms": 104.8576,
+      "weight_bytes": 50940416,
+      "weight_ms": 566.0046222222222,
+      "kv_share": 0.15630273478906084,
+      "ms_per_token": 670.8622222222223
+    }
+  ],
+  "policies": [
+    {
+      "policy": "sliding window + sinks",
+      "state_bits_per_slot": 0,
+      "extra": "ring pointer per (layer, head) (11 bits)",
+      "adds": 0,
+      "muls": 0,
+      "compares": 0,
+      "argmin": false,
+      "buffer_bits": 0,
+      "state_bytes_per_head": 0.0,
+      "state_bytes_total_per_head_mode": 0.0,
+      "state_bytes_total_shared_mode": 0.0,
+      "ops_per_token_per_head_mode": 0,
+      "argmin_cycles_per_token_per_head_mode": 0,
+      "argmin_cycles_per_token_shared": 0,
+      "argmin_ms_per_token_per_head_mode": 0.0
+    },
+    {
+      "policy": "H2O (float) / TIU (8-bit sat.)",
+      "state_bits_per_slot": 8,
+      "extra": "none",
+      "adds": 129,
+      "muls": 0,
+      "compares": 128,
+      "argmin": true,
+      "buffer_bits": 0,
+      "state_bytes_per_head": 129.0,
+      "state_bytes_total_per_head_mode": 16512.0,
+      "state_bytes_total_shared_mode": 1032.0,
+      "ops_per_token_per_head_mode": 32896,
+      "argmin_cycles_per_token_per_head_mode": 16512,
+      "argmin_cycles_per_token_shared": 1032,
+      "argmin_ms_per_token_per_head_mode": 1.032
+    },
+    {
+      "policy": "EMA, alpha = 1 - 2^-k",
+      "state_bits_per_slot": 16,
+      "extra": "none (shift-subtract)",
+      "adds": 258,
+      "muls": 0,
+      "compares": 128,
+      "argmin": true,
+      "buffer_bits": 0,
+      "state_bytes_per_head": 258.0,
+      "state_bytes_total_per_head_mode": 33024.0,
+      "state_bytes_total_shared_mode": 2064.0,
+      "ops_per_token_per_head_mode": 49408,
+      "argmin_cycles_per_token_per_head_mode": 16512,
+      "argmin_cycles_per_token_shared": 1032,
+      "argmin_ms_per_token_per_head_mode": 1.032
+    },
+    {
+      "policy": "EMA, general alpha (0.9, 0.99)",
+      "state_bits_per_slot": 16,
+      "extra": "none",
+      "adds": 129,
+      "muls": 129,
+      "compares": 128,
+      "argmin": true,
+      "buffer_bits": 0,
+      "state_bytes_per_head": 258.0,
+      "state_bytes_total_per_head_mode": 33024.0,
+      "state_bytes_total_shared_mode": 2064.0,
+      "ops_per_token_per_head_mode": 49408,
+      "argmin_cycles_per_token_per_head_mode": 16512,
+      "argmin_cycles_per_token_shared": 1032,
+      "argmin_ms_per_token_per_head_mode": 1.032
+    },
+    {
+      "policy": "recent-window attention, W=16",
+      "state_bits_per_slot": 8,
+      "extra": "last W attention rows (16 x N x 8 b)",
+      "adds": 258,
+      "muls": 0,
+      "compares": 128,
+      "argmin": true,
+      "buffer_bits": 16512,
+      "state_bytes_per_head": 2193.0,
+      "state_bytes_total_per_head_mode": 280704.0,
+      "state_bytes_total_shared_mode": 17544.0,
+      "ops_per_token_per_head_mode": 49408,
+      "argmin_cycles_per_token_per_head_mode": 16512,
+      "argmin_cycles_per_token_shared": 1032,
+      "argmin_ms_per_token_per_head_mode": 1.032
+    }
+  ]
+}
